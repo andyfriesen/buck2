@@ -55,9 +55,10 @@ def merge(args):
     entries = []
     for entry in args.entries:
         if entry.startswith('@'):
-            for entry in json.load(open(entry[1:])):
-                with open(entry) as f:
-                    entries.append(json.load(f))
+            with open(entry[1:]) as argsfile:
+                sub_entries = map(str.strip, argsfile.readlines())
+                with open(sub_entry) as g:
+                    entries.append(json.load(g))
         else:
             with open(entry) as f:
                 entries.append(json.load(f))
