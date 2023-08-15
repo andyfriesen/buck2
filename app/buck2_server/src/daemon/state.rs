@@ -20,8 +20,8 @@ use buck2_build_api::spawner::BuckSpawner;
 use buck2_cli_proto::unstable_dice_dump_request::DiceDumpFormat;
 use buck2_common::cas_digest::DigestAlgorithm;
 use buck2_common::cas_digest::DigestAlgorithmKind;
-use buck2_common::http::counting_client::CountingHttpClient;
-use buck2_common::http::http_client;
+use buck2_common::http::HttpClient;
+use buck2_common::http::HttpClientBuilder;
 use buck2_common::ignores::ignore_set::IgnoreSet;
 use buck2_common::invocation_paths::InvocationPaths;
 use buck2_common::io::IoProvider;
@@ -31,10 +31,11 @@ use buck2_common::result::ToSharedResultExt;
 use buck2_core::cells::name::CellName;
 use buck2_core::env_helper::EnvHelper;
 use buck2_core::facebook_only;
-use buck2_core::fs::fs_util;
+use buck2_core::fs::cwd::WorkingDirectory;
 use buck2_core::fs::project::ProjectRoot;
 use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
 use buck2_core::rollout_percentage::RolloutPercentage;
+use buck2_core::soft_error;
 use buck2_core::tag_result;
 use buck2_events::dispatch::EventDispatcher;
 use buck2_events::sink::scribe;
@@ -78,6 +79,7 @@ use crate::daemon::forkserver::maybe_launch_forkserver;
 use crate::daemon::io_provider::create_io_provider;
 use crate::daemon::panic::DaemonStatePanicDiceDump;
 use crate::daemon::server::BuckdServerInitPreferences;
+
 /// For a buckd process there is a single DaemonState created at startup and never destroyed.
 #[derive(Allocative)]
 pub struct DaemonState {
@@ -91,6 +93,9 @@ pub struct DaemonState {
 
     #[allocative(skip)]
     rt: Handle,
+
+    /// Our working directory, if we did set one.
+    working_directory: Option<WorkingDirectory>,
 }
 
 /// DaemonStateData is the main shared data across all commands. It's lazily initialized on
@@ -158,16 +163,13 @@ pub struct DaemonStateData {
     pub enable_restarter: bool,
 
     /// Http client used for materializer and RunAction implementations.
-    pub http_client: CountingHttpClient,
+    pub http_client: HttpClient,
 
     /// If enabled, paranoid RE downloads.
     pub paranoid: Option<ParanoidDownloader>,
 
     /// Spawner
     pub spawner: Arc<BuckSpawner>,
-
-    /// Did we enable running tonic on a separate runtime?
-    pub use_tonic_rt: bool,
 }
 
 impl DaemonStateData {
@@ -194,11 +196,13 @@ impl DaemonState {
         paths: InvocationPaths,
         init_ctx: BuckdServerInitPreferences,
         rt: Handle,
-        use_tonic_rt: bool,
+        materializations: MaterializationMethod,
+        working_directory: Option<WorkingDirectory>,
     ) -> Self {
-        let data = Self::init_data(fb, paths.clone(), init_ctx, rt.clone(), use_tonic_rt)
+        let data = Self::init_data(fb, paths.clone(), init_ctx, rt.clone(), materializations)
             .await
             .context("Error initializing DaemonStateData");
+
         if let Ok(data) = &data {
             crate::daemon::panic::initialize(data.dupe());
         }
@@ -212,6 +216,7 @@ impl DaemonState {
             paths,
             data,
             rt,
+            working_directory,
         }
     }
 
@@ -222,7 +227,7 @@ impl DaemonState {
         paths: InvocationPaths,
         init_ctx: BuckdServerInitPreferences,
         rt: Handle,
-        use_tonic_rt: bool,
+        materializations: MaterializationMethod,
     ) -> anyhow::Result<Arc<DaemonStateData>> {
         let daemon_state_data_rt = rt.clone();
         rt.spawn(async move {
@@ -239,22 +244,6 @@ impl DaemonState {
             let root_config = legacy_configs
                 .get(cells.root_cell())
                 .context("No config for root cell")?;
-
-            // This really should belong in  in DaemonCommand::run, but we can't read configs there. In
-            // practice, while changing cwd after starting is not a great idea, it's ... fine.
-
-            fs_util::create_dir_all(paths.buck_out_path())
-                .context("Error creating buck_out_path")?;
-
-            let materialization_method = MaterializationMethod::try_new_from_config(
-                legacy_configs.get(cells.root_cell()).ok(),
-            )?;
-
-            if !matches!(materialization_method, MaterializationMethod::Eden) {
-                fs_util::set_current_dir(paths.buck_out_path()).context("Error changing dirs")?;
-                buck2_core::fs::cwd::cwd_will_not_change()
-                    .context("Error initializing static cwd")?;
-            }
 
             static DEFAULT_DIGEST_ALGORITHM: EnvHelper<DigestAlgorithmKind> =
                 EnvHelper::new("BUCK_DEFAULT_DIGEST_ALGORITHM");
@@ -313,8 +302,7 @@ impl DaemonState {
                 })
                 .collect::<anyhow::Result<_>>()?;
 
-            let disk_state_options =
-                DiskStateOptions::new(root_config, materialization_method.dupe())?;
+            let disk_state_options = DiskStateOptions::new(root_config, materializations.dupe())?;
             let blocking_executor = Arc::new(BuckBlockingExecutor::default_concurrency(fs.dupe())?);
             let cache_dir_path = paths.cache_dir_path();
             let valid_cache_dirs = paths.valid_cache_dirs();
@@ -343,7 +331,7 @@ impl DaemonState {
 
                 DeferredMaterializerConfigs {
                     materialize_final_artifacts: matches!(
-                        materialization_method,
+                        materializations,
                         MaterializationMethod::Deferred
                     ),
                     defer_write_actions,
@@ -382,7 +370,10 @@ impl DaemonState {
             )
             .await?;
 
-            let http_client = http_client(init_ctx.daemon_startup_config.allow_vpnless)?;
+            let http_client =
+                HttpClientBuilder::from_startup_config(&init_ctx.daemon_startup_config)
+                    .context("Error creating HTTP client")?
+                    .build();
 
             let materializer_state_identity =
                 materializer_db.as_ref().map(|d| d.identity().clone());
@@ -403,7 +394,7 @@ impl DaemonState {
                 paths.buck_out_dir(),
                 re_client_manager.dupe(),
                 blocking_executor.dupe(),
-                materialization_method,
+                materializations,
                 deferred_materializer_configs,
                 materializer_db,
                 materializer_state,
@@ -508,7 +499,6 @@ impl DaemonState {
                 http_client,
                 paranoid,
                 spawner: Arc::new(BuckSpawner::new(daemon_state_data_rt)),
-                use_tonic_rt,
             }))
         })
         .await?
@@ -521,13 +511,13 @@ impl DaemonState {
         buck_out_path: ProjectRelativePathBuf,
         re_client_manager: Arc<ReConnectionManager>,
         blocking_executor: Arc<dyn BlockingExecutor>,
-        materialization_method: MaterializationMethod,
+        materializations: MaterializationMethod,
         deferred_materializer_configs: DeferredMaterializerConfigs,
         materializer_db: Option<MaterializerStateSqliteDb>,
         materializer_state: Option<MaterializerState>,
-        http_client: CountingHttpClient,
+        http_client: HttpClient,
     ) -> anyhow::Result<Arc<dyn Materializer>> {
-        match materialization_method {
+        match materializations {
             MaterializationMethod::Immediate => Ok(Arc::new(ImmediateMaterializer::new(
                 fs,
                 digest_config,
@@ -651,6 +641,9 @@ impl DaemonState {
             task: false
         )?;
 
+        self.validate_cwd()
+            .context("Error validating working directory")?;
+
         self.validate_buck_out_mount()
             .context("Error validating buck-out mount")?;
 
@@ -674,7 +667,6 @@ impl DaemonState {
                 data.disk_state_options.sqlite_materializer_state
             ),
             format!("paranoid:{}", data.paranoid.is_some()),
-            format!("use_tonic_rt:{}", data.use_tonic_rt),
         ];
 
         dispatcher.instant_event(buck2_data::TagEvent { tags });
@@ -700,10 +692,28 @@ impl DaemonState {
         Ok(self.data.dupe()?)
     }
 
+    fn validate_cwd(&self) -> anyhow::Result<()> {
+        if let Some(working_directory) = &self.working_directory {
+            if working_directory.is_stale()? {
+                // Let's track this for now before making it automated.
+                soft_error!(
+                    "stale_cwd",
+                    anyhow::anyhow!(
+                        "Buck appears to be running in a stale working directory \
+                         This will likely lead to failed or slow builds. \
+                         To remediate, restart Buck2."
+                    )
+                )?;
+            }
+        }
+
+        Ok(())
+    }
+
     fn validate_buck_out_mount(&self) -> anyhow::Result<()> {
         #[cfg(any(fbcode_build, cargo_internal_build))]
         {
-            use buck2_core::soft_error;
+            use buck2_core::fs::fs_util;
 
             let project_root = self.paths.project_root().root();
             if !detect_eden::is_eden(project_root.to_path_buf())? {

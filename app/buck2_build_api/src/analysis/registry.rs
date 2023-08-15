@@ -244,13 +244,13 @@ impl<'v> AnalysisRegistry<'v> {
         dynamic: IndexSet<Artifact>,
         inputs: IndexSet<Artifact>,
         outputs: IndexSet<OutputArtifact>,
-        attributes_lambda: Value<'v>,
-        with_bxl: bool,
+        attributes_plugins_lambda: Value<'v>,
     ) -> anyhow::Result<()> {
         let id = self
             .dynamic
-            .register(dynamic, inputs, outputs, &mut self.deferred, with_bxl)?;
-        self.analysis_value_storage.set_value(id, attributes_lambda);
+            .register(dynamic, inputs, outputs, &mut self.deferred)?;
+        self.analysis_value_storage
+            .set_value(id, attributes_plugins_lambda);
         Ok(())
     }
 
@@ -301,6 +301,10 @@ impl<'v> AnalysisRegistry<'v> {
             dynamic.ensure_bound(&mut deferred, &analysis_value_fetcher)?;
             Ok((frozen_env, deferred))
         })
+    }
+
+    pub fn execution_platform(&self) -> &ExecutionPlatformResolution {
+        self.actions.execution_platform()
     }
 }
 

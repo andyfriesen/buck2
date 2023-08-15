@@ -28,6 +28,7 @@ pub mod actions;
 pub mod analysis;
 pub mod artifact_groups;
 pub mod attrs;
+pub mod audit_cell;
 pub mod audit_dep_files;
 pub mod audit_output;
 pub mod build;
@@ -47,6 +48,6 @@ pub mod transition;
 pub fn init_late_bindings() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
-        interpreter::more::init_more_functions();
+        interpreter::more::init_register_build_api_globals();
     });
 }

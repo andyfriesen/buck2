@@ -17,9 +17,67 @@
 
 use std::fmt::Write;
 
+use dupe::Dupe;
+
 use crate::assert;
+use crate::codemap::CodeMap;
+use crate::slice_vec_ext::SliceExt;
 use crate::slice_vec_ext::VecExt;
+use crate::syntax::lexer::Lexer;
+use crate::syntax::lexer::Token;
+use crate::syntax::AstModule;
+use crate::syntax::Dialect;
 use crate::tests::golden_test_template::golden_test_template;
+
+/// Lex some text and return the tokens. Fails if the program does not parse.
+/// Only available inside the crate because the Token type is not exported.
+fn lex_tokens(program: &str) -> Vec<(usize, Token, usize)> {
+    fn tokens(dialect: &Dialect, program: &str) -> Vec<(usize, Token, usize)> {
+        let codemap = CodeMap::new("assert.bzl".to_owned(), program.to_owned());
+        Lexer::new(program, dialect, codemap.dupe())
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap_or_else(|e|
+                panic!(
+                    "starlark::assert::lex_tokens, expected lex success but failed\nCode: {}\nError: {}",
+                    program, e
+                )
+            )
+    }
+
+    // Check the invariant that each token position can't be before the previous one
+    fn check_spans(tokens: &[(usize, Token, usize)]) {
+        let mut pos = 0;
+        for (i, t, j) in tokens {
+            let span_incorrect = format!("Span of {:?} incorrect", t);
+            assert!(pos <= *i, "{}: {} > {}", span_incorrect, pos, i);
+            assert!(i <= j, "{}: {} > {}", span_incorrect, i, j);
+            pos = *j;
+        }
+    }
+
+    let orig = tokens(&Dialect::Extended, program);
+    check_spans(&orig);
+
+    // In Starlark Windows newline characters shouldn't change the lex tokens (only the positions), so run that test too.
+    // First convert \r\n to \n, in case we started with Windows newlines, so we don't get \r\r\n.
+    let with_r = tokens(
+        &Dialect::Extended,
+        &program.replace("\r\n", "\n").replace('\n', "\r\n"),
+    );
+    check_spans(&with_r);
+    assert_eq!(
+        orig.map(|x| &x.1),
+        with_r.map(|x| &x.1),
+        "starlark::assert::lex_tokens, difference using CRLF newlines\nCode: {}",
+        program,
+    );
+
+    orig
+}
+
+fn lex(program: &str) -> String {
+    lex_tokens(program).map(|x| x.1.unlex()).join(" ")
+}
 
 fn lexer_golden_test(name: &str, program: &str) {
     let program = program.trim();
@@ -31,8 +89,7 @@ fn lexer_golden_test(name: &str, program: &str) {
     writeln!(out).unwrap();
     writeln!(out, "Tokens:").unwrap();
 
-    let tokens =
-        assert::lex_tokens(program).into_map(|(from, token, to)| (from, token.to_string(), to));
+    let tokens = lex_tokens(program).into_map(|(from, token, to)| (from, token.to_string(), to));
     let max_width = tokens
         .iter()
         .map(|(_, token, _)| token.len())
@@ -44,6 +101,31 @@ fn lexer_golden_test(name: &str, program: &str) {
     }
 
     golden_test_template(&format!("src/syntax/lexer_tests/{}.golden", name), &out);
+}
+
+fn lexer_fail_golden_test(name: &str, programs: &[&str]) {
+    let mut out = String::new();
+
+    for (i, program) in programs.iter().enumerate() {
+        if i != 0 {
+            writeln!(out).unwrap();
+        }
+
+        let program = program.trim();
+
+        let e = AstModule::parse("x", program.to_owned(), &Dialect::Extended).unwrap_err();
+
+        writeln!(out, "Program:").unwrap();
+        writeln!(out, "{}", program).unwrap();
+        writeln!(out).unwrap();
+        writeln!(out, "Error:").unwrap();
+        writeln!(out, "{}", e).unwrap();
+    }
+
+    golden_test_template(
+        &format!("src/syntax/lexer_tests/{}.fail.golden", name),
+        &out,
+    );
 }
 
 #[test]
@@ -58,7 +140,7 @@ fn test_int_lit() {
 "#,
     );
     // Starlark requires us to ban leading zeros (confusion with implicit octal)
-    assert::parse_fail("x = !01!");
+    lexer_fail_golden_test("int_lit", &["x = 01"]);
 }
 
 #[test]
@@ -83,7 +165,7 @@ fn test_symbols() {
     lexer_golden_test(
         "symbols",
         ", ; : += -= *= /= //= %= == != <= >= ** = < > - + * % / // . { } [ ] ( ) |\n\
-        ,;:{}[]()|",
+        ,;:{}[]()|...",
     );
 }
 
@@ -106,12 +188,12 @@ fn test_number_collated_with_keywords_or_identifier() {
 
 #[test]
 fn test_reserved() {
-    let reserved =
-        "as import is class nonlocal del raise except try finally while from with global yield"
-            .split_whitespace();
-    for x in reserved {
-        assert::parse_fail(&format!("!{}! = 1", x));
-    }
+    lexer_fail_golden_test(
+        "reserved",
+        &"as import is class nonlocal del raise except try finally while from with global yield"
+            .split_whitespace()
+            .collect::<Vec<&str>>(),
+    );
 }
 
 #[test]
@@ -140,25 +222,30 @@ fn test_identifier() {
 #[test]
 fn test_string_lit() {
     assert_eq!(
-        assert::lex("'123' \"123\" '' \"\" '\\'' \"\\\"\" '\"' \"'\" '\\n' '\\w'"),
+        lex("'123' \"123\" '' \"\" '\\'' \"\\\"\" '\"' \"'\" '\\n' '\\w'"),
         "\"123\" \"123\" \"\" \"\" \"\'\" \"\\\"\" \"\\\"\" \"\'\" \"\\n\" \"\\\\w\" \n"
     );
 
     // unfinished string literal
-    assert::parse_fail("!'!\n'");
-    assert::parse_fail("!\"!\n\"");
-    assert::parse_fail("this = a + test + !r\"!");
-    assert::parse_fail("test + !\' of thing that!");
-    assert::parse_fail("test + !\' of thing that!\n'");
+    lexer_fail_golden_test(
+        "string_lit",
+        &[
+            "'\n'",
+            "\"\n\"",
+            "this = a + test + r\"",
+            "test + \' of thing that",
+            "test + \' of thing that\n'",
+        ],
+    );
 
     // Multiline string
     assert_eq!(
-        assert::lex("'''''' '''\\n''' '''\n''' \"\"\"\"\"\" \"\"\"\\n\"\"\" \"\"\"\n\"\"\""),
+        lex("'''''' '''\\n''' '''\n''' \"\"\"\"\"\" \"\"\"\\n\"\"\" \"\"\"\n\"\"\""),
         "\"\" \"\\n\" \"\\n\" \"\" \"\\n\" \"\\n\" \n"
     );
     // Raw string
     assert_eq!(
-        assert::lex("r'' r\"\" r'\\'' r\"\\\"\" r'\"' r\"'\" r'\\n'"),
+        lex("r'' r\"\" r'\\'' r\"\\\"\" r'\"' r\"'\" r'\\n'"),
         "\"\" \"\" \"\'\" \"\\\"\" \"\\\"\" \"\'\" \"\\\\n\" \n"
     );
 }
@@ -174,10 +261,15 @@ fn test_string_escape() {
 '\372x'
 "#,
     );
-    assert::parse_fail("test 'more !\\xT!Z");
-    assert::parse_fail("test + 'more !\\UFFFFFFFF! overflows'");
-    assert::parse_fail("test 'more !\\x0y!abc'");
-    assert::parse_fail("test 'more !\\x0!");
+    lexer_fail_golden_test(
+        "string_escape",
+        &[
+            "test 'more \\xTZ",
+            "test + 'more \\UFFFFFFFF overflows'",
+            "test 'more \\x0yabc'",
+            "test 'more \\x0",
+        ],
+    );
 }
 
 #[test]
@@ -244,7 +336,7 @@ fn test_span() {
         (37, Newline, 37),
     ];
 
-    let actual = assert::lex_tokens(
+    let actual = lex_tokens(
         r#"
 def test(a):
   fail(a)
@@ -294,27 +386,16 @@ fn test_lexer_operators() {
 
 #[test]
 fn test_lexer_error_messages() {
-    // What are the common errors people make.
-    // Do they have good error messages and span locations.
-    fn f(program: &str, msg: &str) {
-        assert::parse_fail(program);
-        assert::fail(&program.replace('!', ""), msg);
-    }
-
-    f("unknown !$!&%+ operator", "invalid input `$`");
-    f("an !'incomplete string!\nends", "unfinished string literal");
-    f(
-        "an + 'invalid escape !\\x3 ! character'",
-        "invalid string escape sequence `x3 `",
-    );
-    f(
-        "leading_zero = !003! + 8",
-        "integer cannot have leading 0, got `003`",
-    );
-    f("a + (test!]! + c", "unexpected symbol ']' here");
-    f(
-        "reserved_word = !raise! + 1",
-        "cannot use reserved keyword `raise`",
+    lexer_fail_golden_test(
+        "error_messages",
+        &[
+            "unknown $&%+ operator",
+            "an 'incomplete string\nends",
+            "an + 'invalid escape \\x3  character'",
+            "leading_zero = 003 + 8",
+            "a + (test] + c",
+            "reserved_word = raise + 1",
+        ],
     );
 }
 

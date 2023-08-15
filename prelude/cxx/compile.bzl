@@ -6,6 +6,7 @@
 # of this source tree.
 
 load("@prelude//:paths.bzl", "paths")
+load("@prelude//cxx:cxx_toolchain_types.bzl", "CxxToolchainInfo")
 load("@prelude//linking:lto.bzl", "LtoMode")
 load(
     "@prelude//utils:utils.bzl",
@@ -74,7 +75,7 @@ _HeadersDepFiles = record(
     # A function that produces new cmd_args to append to the compile command to
     # get it to emit the dep file. This will receive the output dep file as an
     # input.
-    mk_flags = field("function"),
+    mk_flags = field(typing.Callable),
     # Dependency tracking mode to know how to generate dep file
     dep_tracking_mode = field(DepTrackingMode.type),
 )
@@ -92,47 +93,47 @@ _CxxCompileCommand = record(
 # Information about how to compile a source file.
 CxxSrcCompileCommand = record(
     # Source file to compile.
-    src = field("artifact"),
+    src = field(Artifact),
     # If we have multiple source entries with same files but different flags,
     # specify an index so we can differentiate them. Otherwise, use None.
-    index = field(["int", None], None),
+    index = field([int, None], None),
     # The CxxCompileCommand to use to compile this file.
     cxx_compile_cmd = field(_CxxCompileCommand.type),
     # Arguments specific to the source file.
-    args = field(["_arg"]),
+    args = field(list[typing.Any]),
 )
 
 # Output of creating compile commands for Cxx source files.
 CxxCompileCommandOutput = record(
     # List of compile commands for each source file.
-    src_compile_cmds = field([CxxSrcCompileCommand.type], default = []),
+    src_compile_cmds = field(list[CxxSrcCompileCommand.type], default = []),
     # Argsfiles generated for compiling these source files.
     argsfiles = field(CompileArgsfiles.type, default = CompileArgsfiles()),
     # List of compile commands for use in compilation database generation.
-    comp_db_compile_cmds = field([CxxSrcCompileCommand.type], default = []),
+    comp_db_compile_cmds = field(list[CxxSrcCompileCommand.type], default = []),
 )
 
 # An input to cxx compilation, consisting of a file to compile and optional
 # file specific flags to compile with.
 CxxSrcWithFlags = record(
-    file = field("artifact"),
-    flags = field(["resolved_macro"], []),
+    file = field(Artifact),
+    flags = field(list["resolved_macro"], []),
     # If we have multiple source entries with same files but different flags,
     # specify an index so we can differentiate them. Otherwise, use None.
-    index = field(["int", None], None),
+    index = field([int, None], None),
 )
 
 CxxCompileOutput = record(
     # The compiled `.o` file.
-    object = field("artifact"),
+    object = field(Artifact),
     object_format = field(CxxObjectFormat.type, CxxObjectFormat("native")),
     object_has_external_debug_info = field(bool, False),
     # Externally referenced debug info, which doesn't get linked with the
     # object (e.g. the above `.o` when using `-gsplit-dwarf=single` or the
     # the `.dwo` when using `-gsplit-dwarf=split`).
-    external_debug_info = field(["artifact", None], None),
-    clang_remarks = field(["artifact", None], None),
-    clang_trace = field(["artifact", None], None),
+    external_debug_info = field([Artifact, None], None),
+    clang_remarks = field([Artifact, None], None),
+    clang_trace = field([Artifact, None], None),
 )
 
 def create_compile_cmds(
@@ -259,17 +260,22 @@ def compile_cxx(
     toolchain = get_cxx_toolchain_info(ctx)
     linker_info = toolchain.linker_info
 
-    object_format = toolchain.object_format or CxxObjectFormat("native")
+    # Resolve the output format, which is a tristate of native (default being mach-o/elf/pe)
+    # bitcode (being LLVM-IR, which is also produced if any link time optimization flags are
+    # enabled) or the third hybrid state where the bitcode is embedded into a section of the
+    # native code, allowing the file to be used as either (but at twice the size)
+    default_object_format = toolchain.object_format or CxxObjectFormat("native")
     bitcode_args = cmd_args()
     if linker_info.lto_mode == LtoMode("none"):
         if toolchain.object_format == CxxObjectFormat("bitcode"):
             bitcode_args.add("-emit-llvm")
-            object_format = CxxObjectFormat("bitcode")
+            default_object_format = CxxObjectFormat("bitcode")
         elif toolchain.object_format == CxxObjectFormat("embedded-bitcode"):
             bitcode_args.add("-fembed-bitcode")
-            object_format = CxxObjectFormat("embedded-bitcode")
+            default_object_format = CxxObjectFormat("embedded-bitcode")
     else:
-        object_format = CxxObjectFormat("bitcode")
+        # LTO always produces bitcode object in any mode (thin, full, etc)
+        default_object_format = CxxObjectFormat("bitcode")
 
     objects = []
     for src_compile_cmd in src_compile_cmds:
@@ -354,6 +360,15 @@ def compile_cxx(
             linker_info.lto_mode in (LtoMode("none"), LtoMode("fat"))
         )
 
+        # .S extension is native assembly code (machine level, processor specific)
+        # and clang will happily compile them to .o files, but the object are always
+        # native even if we ask for bitcode.  If we don't mark the output format,
+        # other tools would try and parse the .o file as LLVM-IR and fail.
+        if src_compile_cmd.src.extension in [".S", ".s"]:
+            object_format = CxxObjectFormat("native")
+        else:
+            object_format = default_object_format
+
         objects.append(CxxCompileOutput(
             object = object,
             object_format = object_format,
@@ -376,7 +391,7 @@ def _validate_target_headers(ctx: AnalysisContext, preprocessor: list[CPreproces
         else:
             path_to_artifact[header_path] = header.artifact
 
-def _get_compiler_info(toolchain: "CxxToolchainInfo", ext: CxxExtension.type) -> "_compiler_info":
+def _get_compiler_info(toolchain: CxxToolchainInfo.type, ext: CxxExtension.type) -> typing.Any:
     compiler_info = None
     if ext.value in (".cpp", ".cc", ".mm", ".cxx", ".c++", ".h", ".hpp"):
         compiler_info = toolchain.cxx_compiler_info
@@ -399,7 +414,7 @@ def _get_compiler_info(toolchain: "CxxToolchainInfo", ext: CxxExtension.type) ->
 
     return compiler_info
 
-def _get_compile_base(compiler_info: "_compiler_info") -> cmd_args:
+def _get_compile_base(compiler_info: typing.Any) -> cmd_args:
     """
     Given a compiler info returned by _get_compiler_info, form the base compile args.
     """
@@ -430,7 +445,7 @@ def _dep_file_type(ext: CxxExtension.type) -> [DepFileType.type, None]:
         # This should be unreachable as long as we handle all enum values
         fail("Unknown C++ extension: " + ext.value)
 
-def _add_compiler_info_flags(compiler_info: "_compiler_info", ext: CxxExtension.type, cmd: cmd_args):
+def _add_compiler_info_flags(compiler_info: typing.Any, ext: CxxExtension.type, cmd: cmd_args):
     cmd.add(compiler_info.preprocessor_flags or [])
     cmd.add(compiler_info.compiler_flags or [])
     cmd.add(get_flags_for_reproducible_build(compiler_info.compiler_type))
@@ -441,7 +456,7 @@ def _add_compiler_info_flags(compiler_info: "_compiler_info", ext: CxxExtension.
 
 def _mk_argsfile(
         ctx: AnalysisContext,
-        compiler_info: "_compiler_info",
+        compiler_info: typing.Any,
         preprocessor: CPreprocessorInfo.type,
         ext: CxxExtension.type,
         headers_tag: "artifact_tag",
@@ -506,7 +521,7 @@ def _mk_argsfile(
         args_without_file_prefix_args = args_without_file_prefix_args,
     )
 
-def _attr_compiler_flags(ctx: AnalysisContext, ext: str) -> list[""]:
+def _attr_compiler_flags(ctx: AnalysisContext, ext: str) -> list[typing.Any]:
     return (
         cxx_by_language_ext(ctx.attrs.lang_compiler_flags, ext) +
         flatten(cxx_by_platform(ctx, ctx.attrs.platform_compiler_flags)) +
@@ -516,7 +531,7 @@ def _attr_compiler_flags(ctx: AnalysisContext, ext: str) -> list[""]:
         ctx.attrs.compiler_flags
     )
 
-def _get_dep_tracking_mode(toolchain: "provider", file_type: DepFileType.type) -> DepTrackingMode.type:
+def _get_dep_tracking_mode(toolchain: Provider, file_type: DepFileType.type) -> DepTrackingMode.type:
     if file_type == DepFileType("cpp") or file_type == DepFileType("c"):
         return toolchain.cpp_dep_tracking_mode
     elif file_type == DepFileType("cuda"):

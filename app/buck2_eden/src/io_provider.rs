@@ -207,7 +207,7 @@ impl IoProvider for EdenIoProvider {
                     .try_into()
                     .context("Eden returned an invalid size")?;
 
-                tracing::debug!("getAttributesFromFilesV2({}): ok", path,);
+                tracing::debug!("getAttributesFromFilesV2({}): ok", path);
                 let digest = match self.digest {
                     Digest::Sha1 => {
                         let sha1 = data
@@ -233,7 +233,10 @@ impl IoProvider for EdenIoProvider {
                     }
                 };
 
-                let digest = TrackedFileDigest::new(digest, self.fs.cas_digest_config());
+                let digest = TrackedFileDigest::new(
+                    digest,
+                    self.fs.cas_digest_config().source_files_config(),
+                );
 
                 let is_executable = source_control_type == SourceControlType::EXECUTABLE_FILE;
 
@@ -306,7 +309,7 @@ impl IoProvider for EdenIoProvider {
             .context("Eden did not return a directory result")?
             .into_result()?;
 
-        tracing::debug!("readdir({}): {} entries", path, data.len(),);
+        tracing::debug!("readdir({}): {} entries", path, data.len());
 
         let entries = data
             .into_iter()

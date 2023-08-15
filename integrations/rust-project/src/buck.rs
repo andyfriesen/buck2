@@ -20,7 +20,6 @@ use std::process::Stdio;
 
 use anyhow::Context;
 use serde::Deserialize;
-use tracing::debug;
 use tracing::enabled;
 use tracing::info;
 use tracing::instrument;
@@ -32,6 +31,7 @@ use crate::json_project::Edition;
 use crate::json_project::JsonProject;
 use crate::json_project::Sysroot;
 use crate::target::AliasedTargetInfo;
+use crate::target::ExpandedAndResolved;
 use crate::target::Kind;
 use crate::target::MacroOutput;
 use crate::target::Target;
@@ -42,15 +42,22 @@ use crate::Dep;
 
 pub fn to_json_project(
     sysroot: Sysroot,
-    targets: Vec<Target>,
-    target_map: BTreeMap<Target, TargetInfo>,
+    expanded_and_resolved: ExpandedAndResolved,
     aliases: BTreeMap<Target, AliasedTargetInfo>,
-    proc_macros: BTreeMap<Target, MacroOutput>,
     relative_paths: bool,
 ) -> Result<JsonProject, anyhow::Error> {
+    let mode = select_mode(None);
+    let buck = Buck::new(mode);
+
+    let ExpandedAndResolved {
+        expanded_targets: targets,
+        queried_proc_macros: proc_macros,
+        resolved_deps: target_map,
+    } = expanded_and_resolved;
+
     let targets: BTreeSet<_> = targets.into_iter().collect();
     let target_index = merge_unit_test_targets(target_map);
-    let project_root = Buck.resolve_project_root()?;
+    let project_root = buck.resolve_project_root()?;
 
     let mut crates: Vec<Crate> = Vec::with_capacity(target_index.len());
     for (target, TargetInfoEntry { info, index: _ }) in &target_index {
@@ -246,10 +253,16 @@ fn merge_unit_test_targets(
     target_index
 }
 
-#[derive(Debug)]
-pub struct Buck;
+#[derive(Debug, Default)]
+pub struct Buck {
+    mode: Option<String>,
+}
 
 impl Buck {
+    pub fn new(mode: Option<String>) -> Self {
+        Buck { mode }
+    }
+
     pub fn command(&self) -> Command {
         Command::new("buck2")
     }
@@ -257,6 +270,7 @@ impl Buck {
     /// Return the absolute path of the current Buck project root.
     pub fn resolve_project_root(&self) -> Result<PathBuf, anyhow::Error> {
         let mut command = self.command();
+
         command.args(["root", "--kind=project"]);
 
         let mut stdout = utf8_output(command.output(), &command)?;
@@ -293,85 +307,58 @@ impl Buck {
         Ok(cfg)
     }
 
-    /// Expands a Buck target expression.
-    ///
-    /// Since `rust-project` accepts Buck target experssions like '//common/rust/tools/rust-project/...',
-    /// it is necessary to expand the target expression to query the *actual* targets.
-    #[instrument(skip_all)]
-    pub fn expand_targets(&self, targets: &[Target]) -> Result<Vec<Target>, anyhow::Error> {
+    /// Determines the owning target(s) of the saved file and builds them.
+    #[instrument]
+    pub fn check_saved_file(
+        &self,
+        use_clippy: bool,
+        saved_filed: &Path,
+    ) -> Result<Vec<PathBuf>, anyhow::Error> {
         let mut command = self.command();
-        command.args([
-            "bxl",
-            "prelude//rust/rust-analyzer/resolve_deps.bxl:expand_targets",
-            "--",
-            "--targets",
-        ]);
-        command.args(targets);
-        tracing::info!(?targets);
-        let raw = deserialize_output(command.output(), &command)?;
-        if enabled!(Level::TRACE) {
-            for target in &raw {
-                trace!(%target, "Expanded target from buck");
-            }
+
+        command.args(["--isolation-dir", ".rust-analyzer"]);
+
+        command.arg("bxl");
+        command.args(["--oncall", "rust_devx", "-c", "client.id=rust-project"]);
+
+        if let Some(mode) = &self.mode {
+            command.arg(mode);
         }
-        Ok(raw)
+
+        command.args([
+            "prelude//rust/rust-analyzer/check.bxl:check",
+            "-c=rust.failure_filter=true",
+            "-c=rust.incremental=true",
+        ]);
+
+        // apply BXL scripts-specific arguments:
+        command.args(["--", "--file"]);
+        command.arg(saved_filed.as_os_str());
+
+        command.args(["--use-clippy", &use_clippy.to_string()]);
+
+        let files = deserialize_output(command.output(), &command)?;
+        Ok(files)
     }
 
     #[instrument(skip_all)]
-    pub fn resolve_deps(
-        &self,
-        targets: &[Target],
-    ) -> Result<BTreeMap<Target, TargetInfo>, anyhow::Error> {
+    pub fn expand_and_resolve(&self, targets: &[Target]) -> anyhow::Result<ExpandedAndResolved> {
         let mut command = self.command();
+        command.args(["--isolation-dir", ".rust-analyzer"]);
+        command.arg("bxl");
+        command.args(["--oncall", "rust_devx", "-c", "client.id=rust-project"]);
+        if let Some(mode) = &self.mode {
+            command.arg(mode);
+        }
         command.args([
-            "bxl",
-            "prelude//rust/rust-analyzer/resolve_deps.bxl:query",
+            "prelude//rust/rust-analyzer/resolve_deps.bxl:expand_and_resolve",
+            "-c=rust.failure_filter=true",
+            "-c=rust.incremental=true",
             "--",
             "--targets",
         ]);
         command.args(targets);
-
-        if targets.len() <= 10 {
-            // printing out 10 targets is pretty reasonable information for the user
-            info!(
-                targets_num = targets.len(),
-                ?targets,
-                "resolving dependencies"
-            );
-        } else {
-            // after 10 targets, however, things tend to get a bit unwieldy.
-            info!(targets_num = targets.len(), "resolving dependencies");
-            debug!(?targets);
-        }
-        let raw = deserialize_output(command.output(), &command)?;
-
-        if enabled!(Level::TRACE) {
-            for (target, info) in &raw {
-                trace!(%target, ?info, "parsed target from buck");
-            }
-        }
-        Ok(raw)
-    }
-
-    #[instrument(skip_all)]
-    pub fn query_proc_macros(
-        &self,
-        targets: &[Target],
-    ) -> Result<BTreeMap<Target, MacroOutput>, anyhow::Error> {
-        let mut command = self.command();
-
-        command.args([
-            "bxl",
-            "prelude//rust/rust-analyzer/resolve_deps.bxl:expand_proc_macros",
-            "--",
-            "--targets",
-        ]);
-        command.args(targets);
-
-        info!("building proc macros");
-        let raw: BTreeMap<Target, MacroOutput> = deserialize_output(command.output(), &command)?;
-
-        Ok(raw)
+        deserialize_output(command.output(), &command)
     }
 
     #[instrument(skip_all)]
@@ -387,11 +374,11 @@ impl Buck {
         // name of fbsource//third-party/rust:once_cell-1.15. This
         // query also fetches non-Rust aliases, but they shouldn't
         // hurt anything.
-        command.args([
-            "cquery",
-            "--output-all-attributes",
-            "kind('^alias$', deps(%Ss))",
-        ]);
+        command.arg("cquery");
+        if let Some(mode) = &self.mode {
+            command.arg(mode);
+        }
+        command.args(["--output-all-attributes", "kind('^alias$', deps(%Ss))"]);
         command.args(targets);
 
         info!("resolving aliased libraries");
@@ -487,167 +474,176 @@ pub fn truncate_line_ending(s: &mut String) {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// When we merge targets with their tests, we shouldn't end up
-    /// with a target that depends on itself.
-    #[test]
-    fn merge_tests_no_cycles() {
-        let mut targets = BTreeMap::new();
-
-        targets.insert(
-            Target::new("//foo"),
-            TargetInfo {
-                name: "foo".to_owned(),
-                label: "foo".to_owned(),
-                kind: Kind::Library,
-                edition: None,
-                srcs: vec![],
-                mapped_srcs: BTreeMap::new(),
-                crate_name: None,
-                crate_root: None,
-                deps: vec![],
-                tests: vec![Target::new("//foo-unittest")],
-                named_deps: BTreeMap::new(),
-                proc_macro: None,
-                features: vec![],
-                source_folder: PathBuf::from("/tmp"),
-            },
-        );
-
-        targets.insert(
-            Target::new("//foo-unittest"),
-            TargetInfo {
-                name: "foo-unittest".to_owned(),
-                label: "foo-unittest".to_owned(),
-                kind: Kind::Test,
-                edition: None,
-                srcs: vec![],
-                mapped_srcs: BTreeMap::new(),
-                crate_name: None,
-                crate_root: None,
-                deps: vec![Target::new("//foo")],
-                tests: vec![],
-                named_deps: BTreeMap::new(),
-                proc_macro: None,
-                features: vec![],
-                source_folder: PathBuf::from("/tmp"),
-            },
-        );
-
-        let res = merge_unit_test_targets(targets.clone());
-        let merged_target = res.get(&Target::new("//foo")).unwrap();
-        assert_eq!(*merged_target.info.deps, vec![]);
+pub fn select_mode(mode: Option<String>) -> Option<String> {
+    if let Some(mode) = mode {
+        Some(mode)
+    } else if cfg!(target_os = "macos") {
+        Some("@//mode/mac".to_owned())
+    } else if cfg!(target_os = "windows") {
+        Some("@//mode/win".to_owned())
+    } else {
+        // fallback to the platform default mode. This is likely slower than optimal, but
+        // `rust-project build` will work.
+        None
     }
+}
 
-    #[test]
-    fn merge_target_multiple_tests_no_cycles() {
-        let mut targets = BTreeMap::new();
+/// When we merge targets with their tests, we shouldn't end up
+/// with a target that depends on itself.
+#[test]
+fn merge_tests_no_cycles() {
+    let mut targets = BTreeMap::new();
 
-        targets.insert(
-            Target::new("//foo"),
-            TargetInfo {
-                name: "foo".to_owned(),
-                label: "foo".to_owned(),
-                kind: Kind::Library,
-                edition: None,
-                srcs: vec![],
-                mapped_srcs: BTreeMap::new(),
-                crate_name: None,
-                crate_root: None,
-                deps: vec![Target::new("//foo@rust")],
-                tests: vec![
-                    Target::new("//foo_test"),
-                    Target::new("//foo@rust-unittest"),
-                ],
-                named_deps: BTreeMap::new(),
-                proc_macro: None,
-                features: vec![],
-                source_folder: PathBuf::from("/tmp"),
-            },
-        );
+    targets.insert(
+        Target::new("//foo"),
+        TargetInfo {
+            name: "foo".to_owned(),
+            label: "foo".to_owned(),
+            kind: Kind::Library,
+            edition: None,
+            srcs: vec![],
+            mapped_srcs: BTreeMap::new(),
+            crate_name: None,
+            crate_root: None,
+            deps: vec![],
+            tests: vec![Target::new("//foo-unittest")],
+            named_deps: BTreeMap::new(),
+            proc_macro: None,
+            features: vec![],
+            source_folder: PathBuf::from("/tmp"),
+        },
+    );
 
-        targets.insert(
-            Target::new("//foo@rust"),
-            TargetInfo {
-                name: "foo@rust".to_owned(),
-                label: "foo@rust".to_owned(),
-                kind: Kind::Library,
-                edition: None,
-                srcs: vec![],
-                mapped_srcs: BTreeMap::new(),
-                crate_name: None,
-                crate_root: None,
-                deps: vec![],
-                tests: vec![
-                    Target::new("//foo_test"),
-                    Target::new("//foo@rust-unittest"),
-                ],
-                named_deps: BTreeMap::new(),
-                proc_macro: None,
-                features: vec![],
-                source_folder: PathBuf::from("/tmp"),
-            },
-        );
+    targets.insert(
+        Target::new("//foo-unittest"),
+        TargetInfo {
+            name: "foo-unittest".to_owned(),
+            label: "foo-unittest".to_owned(),
+            kind: Kind::Test,
+            edition: None,
+            srcs: vec![],
+            mapped_srcs: BTreeMap::new(),
+            crate_name: None,
+            crate_root: None,
+            deps: vec![Target::new("//foo")],
+            tests: vec![],
+            named_deps: BTreeMap::new(),
+            proc_macro: None,
+            features: vec![],
+            source_folder: PathBuf::from("/tmp"),
+        },
+    );
 
-        targets.insert(
-            Target::new("//foo_test"),
-            TargetInfo {
-                name: "foo_test".to_owned(),
-                label: "foo_test".to_owned(),
-                kind: Kind::Test,
-                edition: None,
-                srcs: vec![],
-                mapped_srcs: BTreeMap::new(),
-                crate_name: None,
-                crate_root: None,
-                // foo_test depends on foo, which is reasonable, but
-                // we need to be careful when merging test
-                // dependencies of foo@rust to avoid creating cycles.
-                deps: vec![Target::new("//foo"), Target::new("//bar")],
-                tests: vec![],
-                named_deps: BTreeMap::new(),
-                proc_macro: None,
-                features: vec![],
-                source_folder: PathBuf::from("/tmp"),
-            },
-        );
+    let res = merge_unit_test_targets(targets.clone());
+    let merged_target = res.get(&Target::new("//foo")).unwrap();
+    assert_eq!(*merged_target.info.deps, vec![]);
+}
 
-        targets.insert(
-            Target::new("//foo@rust-unittest"),
-            TargetInfo {
-                name: "foo@rust-unittest".to_owned(),
-                label: "foo@rust-unittest".to_owned(),
-                kind: Kind::Test,
-                edition: None,
-                srcs: vec![],
-                mapped_srcs: BTreeMap::new(),
-                crate_name: None,
-                crate_root: None,
-                deps: vec![Target::new("//test-framework")],
-                tests: vec![],
-                named_deps: BTreeMap::new(),
-                proc_macro: None,
-                features: vec![],
-                source_folder: PathBuf::from("/tmp"),
-            },
-        );
+#[test]
+fn merge_target_multiple_tests_no_cycles() {
+    let mut targets = BTreeMap::new();
 
-        let res = merge_unit_test_targets(targets.clone());
-        let merged_foo_target = res.get(&Target::new("//foo")).unwrap();
-        assert_eq!(
-            *merged_foo_target.info.deps,
-            vec![Target::new("//foo@rust")],
-            "Additional dependencies should only come from the foo-unittest crate"
-        );
+    targets.insert(
+        Target::new("//foo"),
+        TargetInfo {
+            name: "foo".to_owned(),
+            label: "foo".to_owned(),
+            kind: Kind::Library,
+            edition: None,
+            srcs: vec![],
+            mapped_srcs: BTreeMap::new(),
+            crate_name: None,
+            crate_root: None,
+            deps: vec![Target::new("//foo@rust")],
+            tests: vec![
+                Target::new("//foo_test"),
+                Target::new("//foo@rust-unittest"),
+            ],
+            named_deps: BTreeMap::new(),
+            proc_macro: None,
+            features: vec![],
+            source_folder: PathBuf::from("/tmp"),
+        },
+    );
 
-        let merged_foo_rust_target = res.get(&Target::new("//foo@rust")).unwrap();
-        assert_eq!(
-            *merged_foo_rust_target.info.deps,
-            vec![Target::new("//test-framework")],
-            "Test dependencies should only come from the foo@rust-unittest crate"
-        );
-    }
+    targets.insert(
+        Target::new("//foo@rust"),
+        TargetInfo {
+            name: "foo@rust".to_owned(),
+            label: "foo@rust".to_owned(),
+            kind: Kind::Library,
+            edition: None,
+            srcs: vec![],
+            mapped_srcs: BTreeMap::new(),
+            crate_name: None,
+            crate_root: None,
+            deps: vec![],
+            tests: vec![
+                Target::new("//foo_test"),
+                Target::new("//foo@rust-unittest"),
+            ],
+            named_deps: BTreeMap::new(),
+            proc_macro: None,
+            features: vec![],
+            source_folder: PathBuf::from("/tmp"),
+        },
+    );
+
+    targets.insert(
+        Target::new("//foo_test"),
+        TargetInfo {
+            name: "foo_test".to_owned(),
+            label: "foo_test".to_owned(),
+            kind: Kind::Test,
+            edition: None,
+            srcs: vec![],
+            mapped_srcs: BTreeMap::new(),
+            crate_name: None,
+            crate_root: None,
+            // foo_test depends on foo, which is reasonable, but
+            // we need to be careful when merging test
+            // dependencies of foo@rust to avoid creating cycles.
+            deps: vec![Target::new("//foo"), Target::new("//bar")],
+            tests: vec![],
+            named_deps: BTreeMap::new(),
+            proc_macro: None,
+            features: vec![],
+            source_folder: PathBuf::from("/tmp"),
+        },
+    );
+
+    targets.insert(
+        Target::new("//foo@rust-unittest"),
+        TargetInfo {
+            name: "foo@rust-unittest".to_owned(),
+            label: "foo@rust-unittest".to_owned(),
+            kind: Kind::Test,
+            edition: None,
+            srcs: vec![],
+            mapped_srcs: BTreeMap::new(),
+            crate_name: None,
+            crate_root: None,
+            deps: vec![Target::new("//test-framework")],
+            tests: vec![],
+            named_deps: BTreeMap::new(),
+            proc_macro: None,
+            features: vec![],
+            source_folder: PathBuf::from("/tmp"),
+        },
+    );
+
+    let res = merge_unit_test_targets(targets.clone());
+    let merged_foo_target = res.get(&Target::new("//foo")).unwrap();
+    assert_eq!(
+        *merged_foo_target.info.deps,
+        vec![Target::new("//foo@rust")],
+        "Additional dependencies should only come from the foo-unittest crate"
+    );
+
+    let merged_foo_rust_target = res.get(&Target::new("//foo@rust")).unwrap();
+    assert_eq!(
+        *merged_foo_rust_target.info.deps,
+        vec![Target::new("//test-framework")],
+        "Test dependencies should only come from the foo@rust-unittest crate"
+    );
 }

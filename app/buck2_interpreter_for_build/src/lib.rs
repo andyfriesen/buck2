@@ -15,6 +15,7 @@ pub mod attrs;
 pub mod interpreter;
 pub mod label;
 pub mod nodes;
+pub mod plugins;
 pub mod rule;
 pub mod super_package;
 
@@ -25,6 +26,7 @@ pub fn init_late_bindings() {
         interpreter::calculation::init_interpreter_calculation_impl();
         interpreter::calculation::init_target_graph_calculation_impl();
         interpreter::build_context::init_starlark_path_from_build_context();
+        plugins::init_plugin_kind_from_value_impl();
         rule::init_frozen_rule_get_impl();
     });
 }

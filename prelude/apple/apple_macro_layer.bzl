@@ -15,7 +15,7 @@ AppleBuckConfigAttributeOverride = record(
     name = field(str),
     section = field(str, default = "apple"),
     key = field(str),
-    positive_values = field([[str], [bool]], default = ["True", "true"]),
+    positive_values = field([list[str], list[bool]], default = ["True", "true"]),
     value_if_true = field([str, bool, None], default = True),
     value_if_false = field([str, bool, None], default = False),
     skip_if_false = field(bool, default = False),
@@ -48,7 +48,7 @@ _APPLE_BINARY_LOCAL_EXECUTION_OVERRIDES = [
     ),
 ]
 
-def apple_macro_layer_set_bool_override_attrs_from_config(overrides: list[AppleBuckConfigAttributeOverride.type]) -> dict[str, "selector"]:
+def apple_macro_layer_set_bool_override_attrs_from_config(overrides: list[AppleBuckConfigAttributeOverride.type]) -> dict[str, Select]:
     attribs = {}
     for override in overrides:
         config_value = read_root_config(override.section, override.key, None)
@@ -59,7 +59,7 @@ def apple_macro_layer_set_bool_override_attrs_from_config(overrides: list[AppleB
             attribs[override.name] = select({
                 "DEFAULT": override.value_if_true if config_is_true else override.value_if_false,
                 # Do not set attribute value for host tools
-                "ovr_config//platform/macos/constraints:execution-platform-transitioned": None,
+                "ovr_config//platform/execution/constraints:execution-platform-transitioned": None,
             })
     return attribs
 
@@ -68,10 +68,23 @@ def apple_library_macro_impl(apple_library_rule = None, **kwargs):
     kwargs.update(apple_macro_layer_set_bool_override_attrs_from_config([APPLE_STRIPPED_OVERRIDE]))
     apple_library_rule(**kwargs)
 
-def apple_binary_macro_impl(apple_binary_rule = None, **kwargs):
+def apple_binary_macro_impl(apple_binary_rule = None, apple_universal_executable = None, **kwargs):
     kwargs.update(apple_macro_layer_set_bool_override_attrs_from_config(_APPLE_BINARY_LOCAL_EXECUTION_OVERRIDES))
     kwargs.update(apple_macro_layer_set_bool_override_attrs_from_config([APPLE_STRIPPED_OVERRIDE]))
-    apple_binary_rule(**kwargs)
+
+    binary_name = kwargs.pop("name")
+
+    if kwargs.pop("supports_universal", False):
+        universal_wrapper_name = binary_name
+        binary_name = universal_wrapper_name + "ThinBinary"
+        apple_universal_executable(
+            name = universal_wrapper_name,
+            executable = ":" + binary_name,
+            labels = kwargs.get("labels"),
+            visibility = kwargs.get("visibility"),
+        )
+
+    apple_binary_rule(name = binary_name, **kwargs)
 
 def apple_package_macro_impl(apple_package_rule = None, **kwargs):
     kwargs.update(apple_package_config())

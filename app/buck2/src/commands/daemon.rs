@@ -12,7 +12,6 @@
 use std::fs::File;
 use std::path::PathBuf;
 use std::process;
-use std::str::FromStr;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -27,12 +26,11 @@ use buck2_client_ctx::version::BuckVersion;
 use buck2_common::buckd_connection::ConnectionType;
 use buck2_common::daemon_dir::DaemonDir;
 use buck2_common::invocation_paths::InvocationPaths;
-use buck2_common::legacy_configs::cells::DaemonStartupConfig;
+use buck2_common::legacy_configs::init::DaemonStartupConfig;
 use buck2_common::memory;
 use buck2_core::env_helper::EnvHelper;
 use buck2_core::fs::fs_util;
 use buck2_core::logging::LogConfigurationReloadHandle;
-use buck2_core::rollout_percentage::RolloutPercentage;
 use buck2_server::builtin_docs::docs::docs_command;
 use buck2_server::daemon::daemon_tcp::create_listener;
 use buck2_server::daemon::server::BuckdServer;
@@ -234,7 +232,7 @@ impl DaemonCommand {
 
         let auth_token = gen_auth_token();
 
-        let (listener, process_info) = if !self.dont_daemonize {
+        let (listener, process_info, endpoint) = if !self.dont_daemonize {
             // We must create stdout/stderr before creating a listener,
             // otherwise it is race:
             // * daemon parent process exits
@@ -260,7 +258,7 @@ impl DaemonCommand {
 
             tracing::info!("Daemonized.");
 
-            (listener, process_info)
+            (listener, process_info, endpoint)
         } else {
             fs_util::write(&pid_path, format!("{}", process::id()))?;
 
@@ -279,13 +277,14 @@ impl DaemonCommand {
 
             write_process_info(&daemon_dir, &process_info)?;
 
-            (listener, process_info)
+            (listener, process_info, endpoint)
         };
 
         tracing::info!("Starting Buck2 daemon");
         tracing::info!("Version: {}", BuckVersion::get_version());
         tracing::info!("PID: {}", process::id());
         tracing::info!("ID: {}", *buck2_events::daemon_id::DAEMON_UUID);
+        tracing::info!("Endpoint: {}", endpoint);
 
         listener_created();
 
@@ -329,30 +328,14 @@ impl DaemonCommand {
         let rt = builder.build().context("Error creating Tokio runtime")?;
         let handle = rt.handle().clone();
 
-        let use_tonic_rt = server_init_ctx
-            .daemon_startup_config
-            .use_tonic_rt
-            .as_deref()
-            .map(RolloutPercentage::from_str)
-            .transpose()
-            .context("Invalid use_tonic_rt")?
-            .unwrap_or_else(RolloutPercentage::never)
-            .roll();
-
-        // TODO(@wendyy) - use tonic_rt after rollout is stable
-        let rt = if use_tonic_rt {
-            tracing::info!("Starting tonic tokio runtime...");
-            Builder::new_multi_thread()
-                .enable_all()
-                .thread_name("buck2-tn")
-                // These values are arbitrary, but I/O shouldn't take up many threads.
-                .worker_threads(2)
-                .max_blocking_threads(2)
-                .build()
-                .context("Error creating Tonic Tokio runtime")?
-        } else {
-            rt
-        };
+        let rt = Builder::new_multi_thread()
+            .enable_all()
+            .thread_name("buck2-tn")
+            // These values are arbitrary, but I/O shouldn't take up many threads.
+            .worker_threads(2)
+            .max_blocking_threads(2)
+            .build()
+            .context("Error creating Tonic Tokio runtime")?;
 
         rt.block_on(async move {
             // Once any item is received on the hard_shutdown_receiver, the daemon process will exit immediately.
@@ -401,7 +384,6 @@ impl DaemonCommand {
                 Box::pin(listener),
                 &BuckdServerDependenciesImpl,
                 handle,
-                use_tonic_rt,
             )
             .fuse();
             let shutdown_future = async move { hard_shutdown_receiver.next().await }.fuse();
@@ -422,23 +404,18 @@ impl DaemonCommand {
 
             tracing::info!("Initialization complete, running the server.");
 
-            // clippy doesn't get along well with the select!
-            #[allow(clippy::mut_mut)]
-            {
-                select! {
-                    _ = buckd_server => {
-                        tracing::info!("server shutdown");
-                    }
-                    reason = shutdown_future => {
-                        let reason = reason.as_deref().unwrap_or("no reason available");
-                        tracing::info!("server forced shutdown: {}", reason);
-                    },
-                };
+            select! {
+                res = buckd_server => {
+                    tracing::info!("server shutdown");
+                    res
+                }
+                reason = shutdown_future => {
+                    let reason = reason.as_deref().unwrap_or("no reason available");
+                    tracing::info!("server forced shutdown: {}", reason);
+                    anyhow::Ok(())
+                },
             }
-
-            anyhow::Ok(())
-        })?;
-        Ok(())
+        })
     }
 
     /// We start a dedicated thread to periodically check that the files in the daemon
@@ -574,7 +551,7 @@ mod tests {
     use buck2_client_ctx::daemon_constraints::gen_daemon_constraints;
     use buck2_common::invocation_paths::InvocationPaths;
     use buck2_common::invocation_roots::InvocationRoots;
-    use buck2_common::legacy_configs::cells::DaemonStartupConfig;
+    use buck2_common::legacy_configs::init::DaemonStartupConfig;
     use buck2_core::fs::paths::file_name::FileNameBuf;
     use buck2_core::fs::project::ProjectRootTemp;
     use buck2_core::logging::LogConfigurationReloadHandle;
@@ -641,7 +618,6 @@ mod tests {
             Box::pin(listener),
             &BuckdServerDependenciesImpl,
             Handle::current(),
-            true,
         ));
 
         let mut client = new_daemon_api_client(endpoint.clone(), process_info.auth_token)

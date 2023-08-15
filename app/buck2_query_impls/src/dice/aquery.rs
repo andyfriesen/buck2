@@ -15,8 +15,10 @@ use async_trait::async_trait;
 use buck2_artifact::actions::key::ActionKey;
 use buck2_build_api::actions::artifact::get_artifact_fs::GetArtifactFs;
 use buck2_build_api::actions::calculation::ActionCalculation;
+use buck2_build_api::actions::query::iter_action_inputs;
 use buck2_build_api::actions::query::ActionInput;
 use buck2_build_api::actions::query::ActionQueryNode;
+use buck2_build_api::actions::query::ActionQueryNodeRef;
 use buck2_build_api::actions::query::SetProjectionInputs;
 use buck2_build_api::analysis::calculation::RuleAnalysisCalculation;
 use buck2_build_api::artifact_groups::ArtifactGroup;
@@ -127,7 +129,8 @@ async fn convert_inputs<'c, 'a, Iter: IntoIterator<Item = &'a ArtifactGroup>>(
             }),
         |v| v,
     );
-    let mut deps = artifacts.into_map(|a| ActionInput::ActionKey(a.dupe()));
+    let mut deps =
+        artifacts.into_map(|a| ActionInput::ActionKey(ActionQueryNodeRef::Action(a.dupe())));
     let mut projection_deps: FuturesOrdered<_> = projections
         .into_iter()
         .map(|key| {
@@ -193,7 +196,7 @@ fn compute_action_node<'c>(
     async move {
         let action = ActionCalculation::get_action(ctx, &key).await?;
         let deps = convert_inputs(ctx, node_cache, action.inputs()?.iter()).await?;
-        Ok(ActionQueryNode::new(action, deps, fs))
+        Ok(ActionQueryNode::new_action(action, deps, fs))
     }
     .boxed()
 }
@@ -245,6 +248,20 @@ impl<'c> AqueryDelegate for DiceAqueryDelegate<'c> {
     async fn get_node(&self, key: &ActionKey) -> anyhow::Result<ActionQueryNode> {
         self.get_action_node(key).await
     }
+
+    async fn expand_artifacts(
+        &self,
+        artifacts: &[ArtifactGroup],
+    ) -> anyhow::Result<Vec<ActionQueryNode>> {
+        let inputs =
+            convert_inputs(self.base_delegate.ctx(), self.nodes_cache.dupe(), artifacts).await?;
+
+        let refs = iter_action_inputs(&inputs)
+            .map(|i| i.require_action())
+            .collect::<Result<Vec<_>, _>>()?;
+
+        futures::future::try_join_all(refs.iter().map(|n| self.get_node(n))).await
+    }
 }
 
 #[async_trait]
@@ -275,13 +292,15 @@ impl<'c> QueryLiterals<ActionQueryNode> for DiceAqueryDelegate<'c> {
                     match self
                         .base_delegate
                         .ctx()
-                        .get_providers(&configured_label)
+                        .get_analysis_result(configured_label.target())
                         .await?
                     {
                         MaybeCompatible::Incompatible(_) => {
                             // ignored
                         }
-                        MaybeCompatible::Compatible(providers) => {
+                        MaybeCompatible::Compatible(analysis) => {
+                            let providers = analysis.lookup_inner(&configured_label)?;
+
                             for output in providers
                                 .provider_collection()
                                 .default_info()
@@ -291,6 +310,9 @@ impl<'c> QueryLiterals<ActionQueryNode> for DiceAqueryDelegate<'c> {
                                     result.insert(self.get_action_node(action_key).await?);
                                 }
                             }
+
+                            result
+                                .insert(ActionQueryNode::new_analysis(configured_label, analysis));
                         }
                     }
                 }

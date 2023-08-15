@@ -7,7 +7,6 @@
  * of this source tree.
  */
 
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -64,15 +63,16 @@ use starlark::values::dict::DictOf;
 use starlark::values::function::FUNCTION_TYPE;
 use starlark::values::none::NoneOr;
 use starlark::values::none::NoneType;
+use starlark::values::typing::StarlarkIter;
 use starlark::values::AllocValue;
 use starlark::values::Heap;
-use starlark::values::StarlarkIter;
 use starlark::values::StringValue;
 use starlark::values::Value;
 use starlark::values::ValueOf;
-use starlark::values::ValueOfComplex;
 use starlark::values::ValueOfUnchecked;
 use starlark::values::ValueTyped;
+use starlark::values::ValueTypedComplex;
+use starlark_map::small_map;
 use starlark_map::small_map::SmallMap;
 use starlark_map::small_set::SmallSet;
 
@@ -295,6 +295,10 @@ fn analysis_actions_methods_actions(builder: &mut MethodsBuilder) {
     /// * `is_executable` (optional): indicates whether the resulting file should be marked with executable permissions
     /// * `allow_args` (optional): must be set to `True` if you want to write parameter arguments to the file (in particular, macros that write to file)
     ///     * If it is true, the result will be a pair of the `artifact` containing content and a list of artifact values that were written by macros, which should be used in hidden fields or similar
+    /// * `absolute` (optional): if set, this action will produce absolute paths in its output when
+    ///   rendering artifact paths. You generally shouldn't use this if you plan to use this action
+    ///   as the input for anything else, as this would effectively result in losing all shared
+    ///   caching.
     fn write<'v>(
         this: &AnalysisActions<'v>,
         #[starlark(require = pos)] output: OutputArtifactArg<'v>,
@@ -303,6 +307,7 @@ fn analysis_actions_methods_actions(builder: &mut MethodsBuilder) {
         #[starlark(require = named, default = false)] allow_args: bool,
         // If set, add artifacts in content as associated artifacts of the output. This will only work for bound artifacts.
         #[starlark(require = named, default = false)] with_inputs: bool,
+        #[starlark(require = named, default = false)] absolute: bool,
         eval: &mut Evaluator<'v, '_>,
     ) -> anyhow::Result<
         Either<
@@ -438,7 +443,11 @@ fn analysis_actions_methods_actions(builder: &mut MethodsBuilder) {
             } else {
                 None
             };
-            UnregisteredWriteAction::new(is_executable, maybe_macro_files)
+            UnregisteredWriteAction {
+                is_executable,
+                macro_files: maybe_macro_files,
+                absolute,
+            }
         };
         this.register_action(
             indexset![],
@@ -579,6 +588,17 @@ fn analysis_actions_methods_actions(builder: &mut MethodsBuilder) {
     ///     and `--local-only` CLI flags. The CLI flags take precedence.
     ///     * The `force_full_hybrid_if_capable` option overrides the `use_limited_hybrid` hybrid.
     ///     The options listed above take precedence if set.
+    ///
+    /// When actions execute, they'll do so from the root of the repository. As they execute,
+    /// actions have exclusive access to their output directory.
+    ///
+    /// Actions also get exclusive access to a "scratch" path that is exposed via the environment
+    /// variable `BUCK_SCRATCH_PATH`. This path is expressed as a path relative to the working
+    /// directory (i.e. relative to the project).
+    ///
+    /// The scratch path is not guaranteed to exist when the action executes. If an action wants to
+    /// use the scratch path, the action should create that directory (Buck does guarantee that the
+    /// directory can be created).
     fn run<'v>(
         this: &AnalysisActions<'v>,
         #[starlark(require = pos)] arguments: Value<'v>,
@@ -598,6 +618,7 @@ fn analysis_actions_methods_actions(builder: &mut MethodsBuilder) {
         // TODO(scottcao): Refactor `no_outputs_cleanup` to `outputs_cleanup`
         #[starlark(require = named, default = false)] no_outputs_cleanup: bool,
         #[starlark(require = named, default = false)] allow_cache_upload: bool,
+        #[starlark(require = named, default = false)] allow_dep_file_cache_upload: bool,
         #[starlark(require = named, default = false)] force_full_hybrid_if_capable: bool,
         #[starlark(require = named)] exe: Option<
             Either<ValueOf<'v, &'v WorkerRunInfo<'v>>, ValueOf<'v, &'v RunInfo<'v>>>,
@@ -727,10 +748,10 @@ fn analysis_actions_methods_actions(builder: &mut MethodsBuilder) {
                 }
 
                 match dep_files_configuration.labels.entry(tag.dupe()) {
-                    Entry::Vacant(v) => {
+                    small_map::Entry::Vacant(v) => {
                         v.insert(Arc::from(key));
                     }
-                    Entry::Occupied(o) => {
+                    small_map::Entry::Occupied(o) => {
                         return Err(RunActionError::ConflictingDepFiles {
                             first: (**o.get()).to_owned(),
                             second: (*key).to_owned(),
@@ -778,6 +799,7 @@ fn analysis_actions_methods_actions(builder: &mut MethodsBuilder) {
             metadata_param,
             no_outputs_cleanup,
             allow_cache_upload,
+            allow_dep_file_cache_upload,
             force_full_hybrid_if_capable,
             unique_input_inodes,
         };
@@ -895,7 +917,7 @@ fn analysis_actions_methods_actions(builder: &mut MethodsBuilder) {
     /// Creates a new transitive set. For details, see https://buck2.build/docs/rule_authors/transitive_sets/.
     fn tset<'v>(
         this: &AnalysisActions<'v>,
-        #[starlark(require = pos)] definition: ValueOfComplex<'v, TransitiveSetDefinition<'v>>,
+        #[starlark(require = pos)] definition: ValueTypedComplex<'v, TransitiveSetDefinition<'v>>,
         value: Option<Value<'v>>,
         children: Option<ValueOfUnchecked<'v, StarlarkIter<Value<'v>>>>,
         eval: &mut Evaluator<'v, '_>,
@@ -927,7 +949,6 @@ fn analysis_actions_methods_actions(builder: &mut MethodsBuilder) {
     ///   * `artifacts` - using one of the artifacts from `dynamic` (example usage: `artifacts[artifact_from_dynamic])` gives an artifact value containing the methods `read_string`, `read_lines`, and `read_json` to obtain the values from the disk in various formats.  Anything too complex should be piped through a Python script for transformation to JSON.
     /// * The function must call `ctx.actions` (probably `ctx.actions.run`) to bind all outputs. It can examine the values of the dynamic variables and depends on the inputs.
     ///   * The function will usually be a `def`, as `lambda` in Starlark does not allow statements, making it quite underpowered.
-    /// * `with_bxl` - Temporary flag for whether or not to evaluate the lambda with a `bxl_ctx`. Requires that the caller is BXL. Eventually, the default context within a dynamic output will be a `bxl_ctx` if `dynamic_output` was called from BXL.
     /// For full details see http://localhost:3000/docs/rule_authors/dynamic_dependencies/.
     fn dynamic_output<'v>(
         this: &'v AnalysisActions<'v>,
@@ -935,7 +956,6 @@ fn analysis_actions_methods_actions(builder: &mut MethodsBuilder) {
         #[starlark(require = named)] inputs: Vec<StarlarkArtifact>,
         #[starlark(require = named)] outputs: Vec<StarlarkOutputOrDeclaredArtifact>,
         #[starlark(require = named)] f: Value<'v>,
-        #[starlark(require = named, default = false)] with_bxl: bool,
         heap: &'v Heap,
     ) -> anyhow::Result<NoneType> {
         // Parameter validation
@@ -956,9 +976,9 @@ fn analysis_actions_methods_actions(builder: &mut MethodsBuilder) {
         let outputs = outputs.iter().map(|x| x.0.artifact()).collect();
 
         // Registration
-        let attributes_lambda = heap.alloc((this.attributes, f));
+        let attributes_plugins_lambda = heap.alloc((this.attributes, this.plugins, f));
         let mut this = this.state();
-        this.register_dynamic_output(dynamic, inputs, outputs, attributes_lambda, with_bxl)?;
+        this.register_dynamic_output(dynamic, inputs, outputs, attributes_plugins_lambda)?;
         Ok(NoneType)
     }
 

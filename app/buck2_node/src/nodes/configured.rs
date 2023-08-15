@@ -25,6 +25,9 @@ use buck2_core::configuration::pair::ConfigurationNoExec;
 use buck2_core::configuration::transition::applied::TransitionApplied;
 use buck2_core::configuration::transition::id::TransitionId;
 use buck2_core::execution_types::execution::ExecutionPlatformResolution;
+use buck2_core::plugins::PluginKind;
+use buck2_core::plugins::PluginKindSet;
+use buck2_core::plugins::PluginLists;
 use buck2_core::provider::label::ConfiguredProvidersLabel;
 use buck2_core::provider::label::ProvidersLabel;
 use buck2_core::provider::label::ProvidersName;
@@ -59,6 +62,7 @@ use crate::nodes::attributes::DEPS;
 use crate::nodes::attributes::EXECUTION_PLATFORM;
 use crate::nodes::attributes::ONCALL;
 use crate::nodes::attributes::PACKAGE;
+use crate::nodes::attributes::PLUGINS;
 use crate::nodes::attributes::TARGET_CONFIGURATION;
 use crate::nodes::attributes::TYPE;
 use crate::nodes::unconfigured::RuleKind;
@@ -177,6 +181,9 @@ struct ConfiguredTargetNodeData {
     deps: ConfiguredTargetNodeDeps,
     exec_deps: ConfiguredTargetNodeDeps,
     platform_cfgs: OrderedMap<TargetLabel, ConfigurationData>,
+    // TODO(JakobDegen): Consider saving some memory by using a more tset like representation of
+    // the plugin lists
+    plugin_lists: PluginLists,
 }
 
 impl Debug for ConfiguredTargetNodeData {
@@ -217,6 +224,7 @@ impl ConfiguredTargetNode {
             Vec::new(),
             Vec::new(),
             OrderedMap::new(),
+            PluginLists::new(),
         )
     }
 
@@ -229,6 +237,7 @@ impl ConfiguredTargetNode {
         deps: Vec<ConfiguredTargetNode>,
         exec_deps: Vec<ConfiguredTargetNode>,
         platform_cfgs: OrderedMap<TargetLabel, ConfigurationData>,
+        plugin_lists: PluginLists,
     ) -> Self {
         Self(Arc::new(Hashed::new(ConfiguredTargetNodeData {
             label: name,
@@ -239,6 +248,7 @@ impl ConfiguredTargetNode {
             deps: ConfiguredTargetNodeDeps(deps.into_boxed_slice()),
             exec_deps: ConfiguredTargetNodeDeps(exec_deps.into_boxed_slice()),
             platform_cfgs,
+            plugin_lists,
         })))
     }
 
@@ -273,7 +283,7 @@ impl ConfiguredTargetNode {
                     CoercedAttr::ConfiguredDep(Box::new(DepAttr {
                         attr_type: DepAttrType::new(
                             ProviderIdSet::EMPTY,
-                            DepAttrTransition::Identity,
+                            DepAttrTransition::Identity(PluginKindSet::EMPTY),
                         ),
                         label: configured_providers_label,
                     })),
@@ -291,6 +301,7 @@ impl ConfiguredTargetNode {
                 execution_platform_resolution: transitioned_node
                     .execution_platform_resolution()
                     .dupe(),
+                plugin_lists: transitioned_node.plugin_lists().clone(),
                 deps: ConfiguredTargetNodeDeps(Box::new([transitioned_node])),
                 exec_deps: ConfiguredTargetNodeDeps(Box::new([])),
                 platform_cfgs: OrderedMap::new(),
@@ -496,6 +507,7 @@ impl ConfiguredTargetNode {
                         .map_or_else(|_| ArcStr::from("<NONE>"), |v| ArcStr::from(v.id())),
                 )),
             ),
+            (PLUGINS, self.plugins_as_attr()),
         ]
         .into_iter()
     }
@@ -562,6 +574,36 @@ impl ConfiguredTargetNode {
             TargetNodeOrForward::TargetNode(_) => None,
             TargetNodeOrForward::Forward(_, n) => Some(n),
         }
+    }
+
+    pub fn uses_plugins(&self) -> &[PluginKind] {
+        match &self.0.target_node {
+            TargetNodeOrForward::TargetNode(target_node) => target_node.uses_plugins(),
+            TargetNodeOrForward::Forward(_, _) => &[],
+        }
+    }
+
+    pub fn plugin_lists(&self) -> &PluginLists {
+        &self.0.plugin_lists
+    }
+
+    fn plugins_as_attr(&self) -> ConfiguredAttr {
+        let mut kinds = Vec::new();
+        for (kind, plugins) in self.plugin_lists().iter_by_kind() {
+            // Using plugin dep here is a bit of an abuse. However, there's no
+            // `ConfiguredAttr::TargetLabel` type, and it also seems excessive to add one for this
+            // reason alone
+            let plugins = plugins
+                .map(|(target, _)| {
+                    ConfiguredAttr::PluginDep(Box::new((target.dupe(), kind.dupe())))
+                })
+                .collect();
+            kinds.push((
+                ConfiguredAttr::String(StringLiteral(ArcStr::from(kind.as_str()))),
+                ConfiguredAttr::List(plugins),
+            ));
+        }
+        ConfiguredAttr::Dict(kinds.into_iter().collect())
     }
 }
 

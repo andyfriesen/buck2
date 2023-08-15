@@ -22,12 +22,14 @@ use crate::slice_vec_ext::VecExt;
 use crate::syntax::ast::ArgumentP;
 use crate::syntax::ast::AssignIdentP;
 use crate::syntax::ast::AssignP;
+use crate::syntax::ast::AssignTargetP;
 use crate::syntax::ast::AstPayload;
 use crate::syntax::ast::ClauseP;
 use crate::syntax::ast::DefP;
 use crate::syntax::ast::ExprP;
 use crate::syntax::ast::FStringP;
 use crate::syntax::ast::ForClauseP;
+use crate::syntax::ast::ForP;
 use crate::syntax::ast::IdentP;
 use crate::syntax::ast::LambdaP;
 use crate::syntax::ast::LoadP;
@@ -62,6 +64,34 @@ impl<A: AstPayload> LoadP<A> {
     }
 }
 
+impl<A: AstPayload> AssignP<A> {
+    pub(crate) fn into_map_payload<B: AstPayload>(
+        self,
+        f: &mut impl AstPayloadFunction<A, B>,
+    ) -> AssignP<B> {
+        let AssignP { lhs, ty, rhs } = self;
+        AssignP {
+            lhs: lhs.into_map_payload(f),
+            ty: ty.map(|ty| ty.into_map_payload(f)),
+            rhs: rhs.into_map_payload(f),
+        }
+    }
+}
+
+impl<A: AstPayload> ForP<A> {
+    pub(crate) fn into_map_payload<B: AstPayload>(
+        self,
+        f: &mut impl AstPayloadFunction<A, B>,
+    ) -> ForP<B> {
+        let ForP { var, over, body } = self;
+        ForP {
+            var: var.into_map_payload(f),
+            over: over.into_map_payload(f),
+            body: Box::new(body.into_map_payload(f)),
+        }
+    }
+}
+
 impl<A: AstPayload> StmtP<A> {
     pub(crate) fn into_map_payload<B: AstPayload>(
         self,
@@ -74,13 +104,7 @@ impl<A: AstPayload> StmtP<A> {
             StmtP::Return(None) => StmtP::Return(None),
             StmtP::Return(Some(e)) => StmtP::Return(Some(e.into_map_payload(f))),
             StmtP::Expression(e) => StmtP::Expression(e.into_map_payload(f)),
-            StmtP::Assign(lhs, ty_rhs) => {
-                let (ty, rhs) = *ty_rhs;
-                StmtP::Assign(
-                    lhs.into_map_payload(f),
-                    Box::new((ty.map(|ty| ty.into_map_payload(f)), rhs.into_map_payload(f))),
-                )
-            }
+            StmtP::Assign(assign) => StmtP::Assign(assign.into_map_payload(f)),
             StmtP::AssignModify(lhs, op, rhs) => StmtP::AssignModify(
                 lhs.into_map_payload(f),
                 op,
@@ -103,13 +127,7 @@ impl<A: AstPayload> StmtP<A> {
                     )),
                 )
             }
-            StmtP::For(assign, coll_body) => {
-                let (coll, body) = *coll_body;
-                StmtP::For(
-                    assign.into_map_payload(f),
-                    Box::new((coll.into_map_payload(f), body.into_map_payload(f))),
-                )
-            }
+            StmtP::For(fr) => StmtP::For(fr.into_map_payload(f)),
             StmtP::Def(DefP {
                 name,
                 params,
@@ -218,30 +236,34 @@ impl<A: AstPayload> TypeExprP<A> {
     ) -> TypeExprP<B> {
         let TypeExprP { expr, payload } = self;
         TypeExprP {
-            expr: expr.into_map(|e| e.into_map_payload(f)),
+            expr: expr.map(|e| e.into_map_payload(f)),
             payload: f.map_type_expr(payload),
         }
     }
 }
 
-impl<A: AstPayload> AssignP<A> {
+impl<A: AstPayload> AssignTargetP<A> {
     pub(crate) fn into_map_payload<B: AstPayload>(
         self,
         f: &mut impl AstPayloadFunction<A, B>,
-    ) -> AssignP<B> {
+    ) -> AssignTargetP<B> {
         match self {
-            AssignP::Tuple(args) => AssignP::Tuple(args.into_map(|a| a.into_map_payload(f))),
-            AssignP::Index(array_index) => {
+            AssignTargetP::Tuple(args) => {
+                AssignTargetP::Tuple(args.into_map(|a| a.into_map_payload(f)))
+            }
+            AssignTargetP::Index(array_index) => {
                 let (array, index) = *array_index;
-                AssignP::Index(Box::new((
+                AssignTargetP::Index(Box::new((
                     array.into_map_payload(f),
                     index.into_map_payload(f),
                 )))
             }
-            AssignP::Dot(object, field) => {
-                AssignP::Dot(Box::new(object.into_map_payload(f)), field)
+            AssignTargetP::Dot(object, field) => {
+                AssignTargetP::Dot(Box::new(object.into_map_payload(f)), field)
             }
-            AssignP::Identifier(ident) => AssignP::Identifier(ident.into_map_payload(f)),
+            AssignTargetP::Identifier(ident) => {
+                AssignTargetP::Identifier(ident.into_map_payload(f))
+            }
         }
     }
 }
@@ -368,7 +390,7 @@ macro_rules! ast_payload_map_stub {
 
 ast_payload_map_stub!(ExprP);
 ast_payload_map_stub!(TypeExprP);
-ast_payload_map_stub!(AssignP);
+ast_payload_map_stub!(AssignTargetP);
 ast_payload_map_stub!(AssignIdentP);
 ast_payload_map_stub!(IdentP);
 ast_payload_map_stub!(ParameterP);

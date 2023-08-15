@@ -44,6 +44,7 @@ message BuckEvent {
 
 // An event that begins a span.
 message SpanStartEvent {
+  reserved 83;
   // TODO(swgillespie) add fields common to span events
   // bool suspending = 1;
   oneof data {
@@ -81,7 +82,6 @@ message SpanStartEvent {
     ReleaseLocalResourcesStart release_local_resources = 81;
     // Measure total time it takes to ensure BXL artifacts.
     BxlEnsureArtifactsStart bxl_ensure_artifacts = 82;
-    QueryEvaluationStart query_evaluation = 83;
     // Used in Buck unit tests.
     FakeStart fake = 999;
   }
@@ -89,6 +89,7 @@ message SpanStartEvent {
 
 // An event that ends a span.
 message SpanEndEvent {
+  reserved 84;
   SpanStats stats = 1;
   // The total duration of this span, as observed by the client.
   google.protobuf.Duration duration = 2;
@@ -128,7 +129,6 @@ message SpanEndEvent {
     SetupLocalResourcesEnd local_resources = 81;
     ReleaseLocalResourcesEnd release_local_resources = 82;
     BxlEnsureArtifactsEnd bxl_ensure_artifacts = 83;
-    QueryEvaluationEnd query_evaluation = 84;
     // Used in Buck unit tests.
     FakeEnd fake = 999;
   }
@@ -144,11 +144,21 @@ message UntrackedFile {
   string file_type = 2;
 }
 
+message StarlarkUserMetadataDictValue {
+  map<string, StarlarkUserMetadataValue> value = 1;
+}
+
+message StarlarkUserMetadataListValue {
+  repeated StarlarkUserMetadataValue value = 1;
+}
+
 message StarlarkUserMetadataValue {
   oneof value {
     string string_value = 1;
     int32 int_value = 2;
     bool bool_value = 3;
+    StarlarkUserMetadataDictValue dict_value = 4;
+    StarlarkUserMetadataListValue list_value = 5;
   }
 }
 
@@ -934,9 +944,7 @@ enum ActionExecutionKind {
   // This action was served inline within buck2 due to its simplicity (e.g.
   // write, symlink, etc.
   ACTION_EXECUTION_KIND_SIMPLE = 4;
-  // This action was skipped entirely because Buck2 determined it was redundant
-  // (e.g. dep files hit).
-  ACTION_EXECUTION_KIND_SKIPPED = 5;
+  // reserving 5 for deprecated ACTION_EXECUTION_KIND_SKIPPED
   // This action was logically executed, but didn't perform all the work.
   ACTION_EXECUTION_KIND_DEFERRED = 6;
   // This action was served by the local dep file cache and not executed.
@@ -1153,6 +1161,13 @@ message ActionExecutionEnd {
 
   // Hostname of this action ran on. This is set only when the action fails.
   optional string hostname = 34;
+
+  // Fields related to the remote dep file cache
+  bool allows_dep_file_cache_upload = 35;
+  bool did_dep_file_cache_upload = 36;
+  // Remote dep file key (the digest we use to populate the action cache).
+  // This is set if the action contains a dep file
+  optional string dep_file_key = 37;
 }
 
 // The beginning of materialization for the output of a target requested,
@@ -1659,6 +1674,14 @@ message InvocationRecord {
   repeated string concurrent_command_ids = 74;
   // The client has failed to connect to the daemon.
   optional bool daemon_connection_failure = 75;
+  // Metadata provided by the client. Unlike TypedMetadata, this won't become
+  // its own column in Scuba, all those entries will land in a NormVector.
+  repeated ClientMetadata client_metadata = 76;
+}
+
+message ClientMetadata {
+  string key = 1;
+  string value = 2;
 }
 
 enum CacheUploadReason {
@@ -1778,10 +1801,6 @@ message BxlDiceInvocationEnd {}
 message BxlEnsureArtifactsStart {}
 
 message BxlEnsureArtifactsEnd {}
-
-message QueryEvaluationStart {}
-
-message QueryEvaluationEnd {}
 
 message DiceBlockConcurrentCommandStart {
   string current_active_trace_id = 1;

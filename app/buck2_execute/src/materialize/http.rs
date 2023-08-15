@@ -17,7 +17,6 @@ use buck2_common::cas_digest::CasDigestConfig;
 use buck2_common::cas_digest::DigestAlgorithmKind;
 use buck2_common::file_ops::FileDigest;
 use buck2_common::file_ops::TrackedFileDigest;
-use buck2_common::http::counting_client::CountingHttpClient;
 use buck2_common::http::retries::http_retry;
 use buck2_common::http::retries::AsHttpError;
 use buck2_common::http::retries::HttpError;
@@ -78,6 +77,17 @@ enum HttpDownloadError {
     #[error("Invalid {0} digest. Expected {1}, got {2}. URL: {3}")]
     InvalidChecksum(&'static str, String, String, String),
 
+    #[error(
+        "Received invalid {kind} digest from {url}; perhaps this is not allowed on vpnless?. Expected {want}, got {got}. Downloaded file at {path}."
+    )]
+    MaybeNotAllowedOnVpnless {
+        kind: &'static str,
+        want: String,
+        got: String,
+        url: String,
+        path: String,
+    },
+
     #[error(transparent)]
     IoError(anyhow::Error),
 }
@@ -94,12 +104,14 @@ impl AsHttpError for HttpDownloadError {
     fn as_http_error(&self) -> Option<&HttpError> {
         match self {
             Self::Client(e) => Some(e),
-            Self::InvalidChecksum(..) | Self::IoError(..) => None,
+            Self::InvalidChecksum(..)
+            | Self::IoError(..)
+            | Self::MaybeNotAllowedOnVpnless { .. } => None,
         }
     }
 }
 
-pub async fn http_head(client: &dyn HttpClient, url: &str) -> anyhow::Result<Response<()>> {
+pub async fn http_head(client: &HttpClient, url: &str) -> anyhow::Result<Response<()>> {
     let response = http_retry(
         || async {
             client
@@ -114,7 +126,7 @@ pub async fn http_head(client: &dyn HttpClient, url: &str) -> anyhow::Result<Res
 }
 
 pub async fn http_download(
-    client: &CountingHttpClient,
+    client: &HttpClient,
     fs: &ProjectRoot,
     digest_config: DigestConfig,
     path: &ProjectRelativePath,
@@ -145,6 +157,7 @@ pub async fn http_download(
                 buf_writer,
                 digest_config.cas_digest_config(),
                 checksum,
+                client.supports_vpnless(),
             )
             .await?;
 
@@ -171,6 +184,7 @@ async fn copy_and_hash(
     mut writer: impl Write,
     digest_config: CasDigestConfig,
     checksum: &Checksum,
+    is_vpnless: bool,
 ) -> Result<FileDigest, HttpDownloadError> {
     let mut digester = FileDigest::digester(digest_config);
 
@@ -237,6 +251,15 @@ async fn copy_and_hash(
         };
 
         if expected != obtained {
+            if is_vpnless {
+                return Err(HttpDownloadError::MaybeNotAllowedOnVpnless {
+                    kind,
+                    want: expected.to_owned(),
+                    got: obtained,
+                    url: url.to_owned(),
+                    path: abs_path.to_string(),
+                });
+            }
             return Err(HttpDownloadError::InvalidChecksum(
                 kind,
                 expected.to_owned(),
@@ -270,6 +293,7 @@ mod test {
             &mut out,
             digest_config,
             checksum,
+            false,
         )
         .await?;
 

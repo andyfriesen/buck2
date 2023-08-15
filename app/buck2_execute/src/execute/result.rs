@@ -124,6 +124,10 @@ pub struct CommandExecutionResult {
     pub rejected_execution: Option<CommandExecutionReport>,
     /// Whether this was uploaded to cache, by Buck2.
     pub did_cache_upload: bool,
+    /// Whether dep file information for this action was uploaded to cache, by Buck2.
+    pub did_dep_file_cache_upload: bool,
+    // Remote dep file key, if we did upload a dep file entry
+    pub dep_file_key: Option<String>,
     /// Whether this command was eligible for hybrid execution.
     pub eligible_for_full_hybrid: bool,
 }
@@ -135,6 +139,15 @@ impl CommandExecutionResult {
             .values()
             .map(|v| v.calc_output_count_and_bytes().bytes)
             .sum()
+    }
+
+    pub fn was_locally_executed(&self) -> bool {
+        match self.report.status {
+            CommandExecutionStatus::Success {
+                execution_kind: CommandExecutionKind::Local { .. },
+            } => true,
+            _ => false,
+        }
     }
 
     pub fn resolve_outputs<'a>(

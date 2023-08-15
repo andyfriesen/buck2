@@ -13,23 +13,23 @@ load("@prelude//utils:utils.bzl", "expect")
 _UNSCRUBBED_JARS_DIR = "unscrubbed"
 
 ProguardOutput = record(
-    jars_to_owners = {"artifact": "target_label"},
-    proguard_configuration_output_file = ["artifact", None],
-    proguard_mapping_output_file = "artifact",
-    proguard_artifacts = ["artifact"],
-    proguard_hidden_artifacts = ["artifact"],
+    jars_to_owners = dict[Artifact, "target_label"],
+    proguard_configuration_output_file = [Artifact, None],
+    proguard_mapping_output_file = Artifact,
+    proguard_artifacts = list[Artifact],
+    proguard_hidden_artifacts = list[Artifact],
 )
 
 def _get_proguard_command_line_args(
         ctx: AnalysisContext,
-        inputs_to_unscrubbed_outputs: dict["artifact", "artifact"],
-        proguard_configs: list["artifact"],
-        additional_library_jars: list["artifact"],
-        mapping: "artifact",
-        configuration: ["artifact", None],
-        seeds: ["artifact", None],
-        usage: ["artifact", None],
-        android_toolchain: "AndroidToolchainInfo") -> (cmd_args, list["artifact"]):
+        inputs_to_unscrubbed_outputs: dict[Artifact, Artifact],
+        proguard_configs: list[Artifact],
+        additional_library_jars: list[Artifact],
+        mapping: Artifact,
+        configuration: [Artifact, None],
+        seeds: [Artifact, None],
+        usage: [Artifact, None],
+        android_toolchain: AndroidToolchainInfo.type) -> (cmd_args, list[Artifact]):
     cmd = cmd_args()
     hidden = []
     cmd.add("-basedirectory", "<user.dir>")
@@ -70,11 +70,12 @@ def _get_proguard_command_line_args(
 
 def run_proguard(
         ctx: AnalysisContext,
-        android_toolchain: "AndroidToolchainInfo",
-        java_toolchain: "JavaToolchainInfo",
-        command_line_args_file: "artifact",
+        android_toolchain: AndroidToolchainInfo.type,
+        java_toolchain: JavaToolchainInfo.type,
+        command_line_args_file: Artifact,
         command_line_args: cmd_args,
-        mapping_file: "artifact"):
+        mapping_file: Artifact,
+        usage_file: Artifact):
     run_proguard_cmd = cmd_args()
     run_proguard_cmd.add(
         java_toolchain.java[RunInfo],
@@ -88,13 +89,14 @@ def run_proguard(
     run_proguard_cmd.hidden(command_line_args)
 
     # Some proguard configs can propagate the "-dontobfuscate" flag which disables
-    # obfuscation and prevents the mapping.txt file from being generated.
+    # obfuscation and prevents the mapping.txt and usage.txt file from being generated.
     sh_cmd = cmd_args([
         "sh",
         "-c",
-        "touch $1 && $2",
+        "touch $1 && touch $2 && $3",
         "--",
         mapping_file.as_output(),
+        usage_file.as_output(),
         cmd_args(run_proguard_cmd, delimiter = " "),
     ])
 
@@ -104,10 +106,10 @@ def run_proguard(
 # e.g. Redex might want to consume it) but we don't actually run the proguard command.
 def get_proguard_output(
         ctx: AnalysisContext,
-        input_jars: dict["artifact", "target_label"],
+        input_jars: dict[Artifact, "target_label"],
         java_packaging_deps: list["JavaPackagingDep"],
-        aapt_generated_proguard_config: ["artifact", None],
-        additional_library_jars: list["artifact"]) -> ProguardOutput.type:
+        aapt_generated_proguard_config: [Artifact, None],
+        additional_library_jars: list[Artifact]) -> ProguardOutput.type:
     proguard_configs = [packaging_dep.proguard_config for packaging_dep in java_packaging_deps if packaging_dep.proguard_config]
     if ctx.attrs.proguard_config:
         proguard_configs.append(ctx.attrs.proguard_config)
@@ -160,6 +162,7 @@ def get_proguard_output(
             command_line_args_file,
             command_line_args,
             mapping,
+            usage,
         )
         output_jars = {}
         for i, (unscrubbed_jar, target_label) in enumerate(unscrubbed_output_jars.items()):

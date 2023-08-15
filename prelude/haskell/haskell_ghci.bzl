@@ -13,13 +13,20 @@ load(
     "cxx_link_shared_library",
 )
 load(
+    "@prelude//cxx:link_types.bzl",
+    "link_options",
+)
+load(
     "@prelude//haskell:haskell.bzl",
+    "HaskellLibraryInfo",
     "HaskellLibraryProvider",
     "HaskellToolchainInfo",
     "PackagesInfo",
     "attr_deps",
+    "get_artifact_suffix",
     "get_packages_info",
 )
+load("@prelude//linking:execution_preference.bzl", "LinkExecutionPreference")
 load(
     "@prelude//linking:link_info.bzl",
     "LinkArgs",
@@ -49,8 +56,8 @@ load(
 load("@prelude//utils:utils.bzl", "flatten")
 
 GHCiPreloadDepsInfo = record(
-    preload_symlinks = {str: "artifact"},
-    preload_deps_root = "artifact",
+    preload_symlinks = dict[str, Artifact],
+    preload_deps_root = Artifact,
 )
 
 USER_GHCI_PATH = "user_ghci_path"
@@ -63,8 +70,8 @@ GHCI_PACKAGER = "ghc_pkg_path"
 GHCI_GHC_PATH = "ghc_path"
 
 HaskellOmnibusData = record(
-    omnibus = "artifact",
-    so_symlinks_root = "artifact",
+    omnibus = Artifact,
+    so_symlinks_root = Artifact,
 )
 
 def _write_final_ghci_script(
@@ -73,11 +80,12 @@ def _write_final_ghci_script(
         packages_info: PackagesInfo.type,
         packagedb_args: "cmd_args",
         prebuilt_packagedb_args: "cmd_args",
-        iserv_script: "artifact",
-        start_ghci_file: "artifact",
-        ghci_bin: "artifact",
+        iserv_script: Artifact,
+        start_ghci_file: Artifact,
+        ghci_bin: Artifact,
         haskell_toolchain: HaskellToolchainInfo.type,
-        ghci_script_template: "artifact") -> "artifact":
+        ghci_script_template: Artifact,
+        enable_profiling: bool) -> Artifact:
     srcs = " ".join(
         [
             paths.normalize(
@@ -102,7 +110,7 @@ def _write_final_ghci_script(
         "-fexternal-dynamic-refs",
     ])
 
-    if (ctx.attrs.enable_profiling):
+    if (enable_profiling):
         compiler_flags.add([
             "-prof",
             "-osuf p_o",
@@ -277,14 +285,17 @@ def _build_haskell_omnibus_so(
     link_result = cxx_link_shared_library(
         ctx,
         soname,
-        links = [
-            LinkArgs(flags = extra_ldflags),
-            LinkArgs(infos = body_link_infos.values()),
-            LinkArgs(infos = tp_deps_shared_link_infos.values()),
-        ],
-        category_suffix = "omnibus",
-        link_weight = linker_info.link_weight,
-        identifier = soname,
+        opts = link_options(
+            links = [
+                LinkArgs(flags = extra_ldflags),
+                LinkArgs(infos = body_link_infos.values()),
+                LinkArgs(infos = tp_deps_shared_link_infos.values()),
+            ],
+            category_suffix = "omnibus",
+            link_weight = linker_info.link_weight,
+            identifier = soname,
+            link_execution_preference = LinkExecutionPreference("any"),
+        ),
     )
     omnibus = link_result.linked_object.output
 
@@ -297,13 +308,13 @@ def _build_haskell_omnibus_so(
 # script template.
 def _replace_macros_in_script_template(
         ctx: AnalysisContext,
-        script_template: "artifact",
+        script_template: Artifact,
         haskell_toolchain: HaskellToolchainInfo.type,
         # Optional artifacts
-        ghci_bin: ["artifact", None] = None,
-        start_ghci: ["artifact", None] = None,
-        iserv_script: ["artifact", None] = None,
-        squashed_so: ["artifact", None] = None,
+        ghci_bin: [Artifact, None] = None,
+        start_ghci: [Artifact, None] = None,
+        iserv_script: [Artifact, None] = None,
+        squashed_so: [Artifact, None] = None,
         # Optional cmd_args
         exposed_package_args: ["cmd_args", None] = None,
         packagedb_args: ["cmd_args", None] = None,
@@ -313,7 +324,7 @@ def _replace_macros_in_script_template(
         srcs: [str, None] = None,
         output_name: [str, None] = None,
         ghci_iserv_path: [str, None] = None,
-        preload_libs: [str, None] = None) -> "artifact":
+        preload_libs: [str, None] = None) -> Artifact:
     toolchain_paths = {
         BINUTILS_PATH: haskell_toolchain.ghci_binutils_path,
         GHCI_LIB_PATH: haskell_toolchain.ghci_lib_path,
@@ -403,7 +414,8 @@ def _replace_macros_in_script_template(
 def _write_iserv_script(
         ctx: AnalysisContext,
         preload_deps_info: GHCiPreloadDepsInfo.type,
-        haskell_toolchain: HaskellToolchainInfo.type) -> "artifact":
+        haskell_toolchain: HaskellToolchainInfo.type,
+        enable_profiling: bool) -> Artifact:
     ghci_iserv_template = haskell_toolchain.ghci_iserv_template
 
     if (not ghci_iserv_template):
@@ -417,13 +429,13 @@ def _write_iserv_script(
         ) for so in sorted(preload_deps_info.preload_symlinks)],
     )
 
-    if ctx.attrs.enable_profiling:
+    if enable_profiling:
         ghci_iserv_path = haskell_toolchain.ghci_iserv_prof_path
     else:
         ghci_iserv_path = haskell_toolchain.ghci_iserv_path
 
     iserv_script_name = "iserv"
-    if ctx.attrs.enable_profiling:
+    if enable_profiling:
         iserv_script_name += "-prof"
 
     iserv_script = _replace_macros_in_script_template(
@@ -496,7 +508,7 @@ def _build_preload_deps_root(
     )
 
 # Symlink the ghci binary that will be used, e.g. the internal fork in Haxlsh
-def _symlink_ghci_binary(ctx, ghci_bin: "artifact"):
+def _symlink_ghci_binary(ctx, ghci_bin: Artifact):
     # TODO(T155760998): set ghci_ghc_path as a dependency instead of string
     ghci_bin_dep = ctx.attrs.ghci_bin_dep
     if not ghci_bin_dep:
@@ -508,7 +520,9 @@ def _symlink_ghci_binary(ctx, ghci_bin: "artifact"):
     src = ghci_bin_dep[DefaultInfo].default_outputs[0]
     ctx.actions.symlink_file(ghci_bin.as_output(), src)
 
-def _first_order_haskell_deps(ctx: AnalysisContext) -> list["HaskellLibraryInfo"]:
+def _first_order_haskell_deps(
+        ctx: AnalysisContext,
+        _enable_profiling: bool) -> list[HaskellLibraryInfo.type]:
     return dedupe(
         flatten(
             [
@@ -520,7 +534,10 @@ def _first_order_haskell_deps(ctx: AnalysisContext) -> list["HaskellLibraryInfo"
     )
 
 # Creates the start.ghci script used to load the packages during startup
-def _write_start_ghci(ctx: AnalysisContext, script_file: "artifact"):
+def _write_start_ghci(
+        ctx: AnalysisContext,
+        script_file: Artifact,
+        enable_profiling: bool):
     start_cmd = cmd_args()
 
     # Reason for unsetting `LD_PRELOAD` env var obtained from D6255224:
@@ -535,7 +552,7 @@ def _write_start_ghci(ctx: AnalysisContext, script_file: "artifact"):
     set_cmd = cmd_args(":set", delimiter = " ")
     first_order_deps = list(map(
         lambda dep: dep.name + "-" + dep.version,
-        _first_order_haskell_deps(ctx),
+        _first_order_haskell_deps(ctx, enable_profiling),
     ))
     deduped_deps = {pkg: 1 for pkg in first_order_deps}.keys()
     package_list = cmd_args(
@@ -560,9 +577,11 @@ def _write_start_ghci(ctx: AnalysisContext, script_file: "artifact"):
     else:
         ctx.actions.copy_file(script_file, header_ghci)
 
-def haskell_ghci_impl(ctx: AnalysisContext) -> list["provider"]:
+def haskell_ghci_impl(ctx: AnalysisContext) -> list[Provider]:
+    enable_profiling = ctx.attrs.enable_profiling
+
     start_ghci_file = ctx.actions.declare_output("start.ghci")
-    _write_start_ghci(ctx, start_ghci_file)
+    _write_start_ghci(ctx, start_ghci_file, enable_profiling)
 
     ghci_bin = ctx.actions.declare_output(ctx.attrs.name + ".bin/ghci")
     _symlink_ghci_binary(ctx, ghci_bin)
@@ -575,7 +594,12 @@ def haskell_ghci_impl(ctx: AnalysisContext) -> list["provider"]:
     if (not ghci_script_template):
         fail("ghci_script_template missing in haskell_toolchain")
 
-    iserv_script = _write_iserv_script(ctx, preload_deps_info, haskell_toolchain)
+    iserv_script = _write_iserv_script(
+        ctx,
+        preload_deps_info,
+        haskell_toolchain,
+        enable_profiling,
+    )
 
     link_style = LinkStyle("static_pic")
 
@@ -601,8 +625,12 @@ def haskell_ghci_impl(ctx: AnalysisContext) -> list["provider"]:
                 package_symlinks_root,
                 lib.name,
             )
+            artifact_suffix = get_artifact_suffix(
+                link_style,
+                lib.profiling_enabled,
+            )
             lib_symlinks = {
-                ("hi-" + link_style.value): lib.import_dirs[0],
+                ("hi-" + artifact_suffix): lib.import_dirs[0],
                 "packagedb": lib.db,
             }
             for o in lib.libs:
@@ -648,6 +676,7 @@ def haskell_ghci_impl(ctx: AnalysisContext) -> list["provider"]:
         ghci_bin,
         haskell_toolchain,
         ghci_script_template,
+        enable_profiling,
     )
 
     outputs = [

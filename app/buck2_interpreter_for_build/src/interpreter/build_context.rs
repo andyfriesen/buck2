@@ -10,23 +10,20 @@
 use std::fmt::Debug;
 
 use buck2_common::legacy_configs::view::LegacyBuckConfigView;
-use buck2_core::build_file_path::BuildFilePath;
-use buck2_core::bzl::ImportPath;
 use buck2_core::cells::build_file_cell::BuildFileCell;
 use buck2_core::cells::CellResolver;
 use buck2_core::package::PackageLabel;
 use buck2_interpreter::build_context::STARLARK_PATH_FROM_BUILD_CONTEXT;
 use buck2_interpreter::file_type::StarlarkFileType;
-use buck2_interpreter::path::BxlFilePath;
-use buck2_interpreter::path::PackageFilePath;
-use buck2_interpreter::path::StarlarkModulePath;
-use buck2_interpreter::path::StarlarkPath;
+use buck2_interpreter::paths::bxl::BxlFilePath;
+use buck2_interpreter::paths::path::StarlarkPath;
 use starlark::any::ProvidesStaticType;
 use starlark::environment::Module;
 use starlark::eval::Evaluator;
 use thiserror::Error;
 
 use crate::interpreter::buckconfig::LegacyBuckConfigForStarlark;
+use crate::interpreter::bzl_eval_ctx::BzlEvalCtx;
 use crate::interpreter::cell_info::InterpreterCellInfo;
 use crate::interpreter::functions::host_info::HostInfo;
 use crate::interpreter::module_internals::ModuleInternals;
@@ -55,19 +52,20 @@ enum BuildContextError {
 #[derive(Debug)]
 pub(crate) enum PerFileTypeContext {
     /// Context for evaluating `BUCK` files.
-    Build(BuildFilePath, ModuleInternals),
+    Build(ModuleInternals),
     /// Context for evaluating `PACKAGE` files.
-    Package(PackageFilePath, PackageFileEvalCtx),
-    Bzl(ImportPath),
+    Package(PackageFileEvalCtx),
+    /// Context for evaluating `bzl` files.
+    Bzl(BzlEvalCtx),
     Bxl(BxlFilePath),
 }
 
 impl PerFileTypeContext {
     pub(crate) fn starlark_path(&self) -> StarlarkPath {
         match self {
-            PerFileTypeContext::Build(path, _) => StarlarkPath::BuildFile(path),
-            PerFileTypeContext::Package(path, _) => StarlarkPath::PackageFile(path),
-            PerFileTypeContext::Bzl(path) => StarlarkPath::LoadFile(path),
+            PerFileTypeContext::Build(module) => StarlarkPath::BuildFile(module.buildfile_path()),
+            PerFileTypeContext::Package(package) => StarlarkPath::PackageFile(&package.path),
+            PerFileTypeContext::Bzl(path) => StarlarkPath::LoadFile(&path.bzl_path),
             PerFileTypeContext::Bxl(path) => StarlarkPath::BxlFile(path),
         }
     }
@@ -78,7 +76,7 @@ impl PerFileTypeContext {
 
     pub(crate) fn require_build(&self, function_name: &str) -> anyhow::Result<&ModuleInternals> {
         match self {
-            PerFileTypeContext::Build(_, internals) => Ok(internals),
+            PerFileTypeContext::Build(internals) => Ok(internals),
             x => {
                 Err(BuildContextError::NotBuildFile(function_name.to_owned(), x.file_type()).into())
             }
@@ -87,7 +85,7 @@ impl PerFileTypeContext {
 
     pub(crate) fn into_build(self) -> anyhow::Result<ModuleInternals> {
         match self {
-            PerFileTypeContext::Build(_, internals) => Ok(internals),
+            PerFileTypeContext::Build(internals) => Ok(internals),
             x => Err(BuildContextError::NotBuildFileNoFunction(x.file_type()).into()),
         }
     }
@@ -97,7 +95,7 @@ impl PerFileTypeContext {
         function_name: &str,
     ) -> anyhow::Result<&PackageFileEvalCtx> {
         match self {
-            PerFileTypeContext::Package(_, ctx) => Ok(ctx),
+            PerFileTypeContext::Package(ctx) => Ok(ctx),
             x => Err(
                 BuildContextError::NotPackageFile(function_name.to_owned(), x.file_type()).into(),
             ),
@@ -106,15 +104,8 @@ impl PerFileTypeContext {
 
     pub(crate) fn into_package_file(self) -> anyhow::Result<PackageFileEvalCtx> {
         match self {
-            PerFileTypeContext::Package(_, ctx) => Ok(ctx),
+            PerFileTypeContext::Package(ctx) => Ok(ctx),
             x => Err(BuildContextError::NotPackageFileNoFunction(x.file_type()).into()),
-        }
-    }
-
-    pub(crate) fn for_module(path: StarlarkModulePath) -> PerFileTypeContext {
-        match path {
-            StarlarkModulePath::LoadFile(bzl) => PerFileTypeContext::Bzl(bzl.clone()),
-            StarlarkModulePath::BxlFile(bxl) => PerFileTypeContext::Bxl(bxl.clone()),
         }
     }
 }
@@ -200,7 +191,7 @@ impl<'a> BuildContext<'a> {
 
     pub fn require_package(&self) -> anyhow::Result<PackageLabel> {
         match &self.additional {
-            PerFileTypeContext::Build(path, _) => Ok(path.package()),
+            PerFileTypeContext::Build(module) => Ok(module.buildfile_path().package()),
             _ => Err(BuildContextError::PackageOnlyFromBuildFile.into()),
         }
     }

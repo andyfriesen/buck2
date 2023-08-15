@@ -37,7 +37,6 @@ load(
     "XcodeDataInfo",
     "generate_xcode_data",
 )
-load("@prelude//linking:execution_preference.bzl", "LinkExecutionPreference")
 load(
     "@prelude//linking:link_groups.bzl",
     "gather_link_group_libs",
@@ -48,7 +47,6 @@ load(
     "LinkInfo",
     "LinkOrdering",  # @unused Used as a type
     "LinkStyle",
-    "Linkage",
     "LinkedObject",  # @unused Used as a type
     "ObjectsLinkable",
     "merge_link_infos",
@@ -99,7 +97,7 @@ load(
     "cxx_attr_linker_flags",
     "cxx_attr_resources",
     "cxx_is_gnu",
-    "cxx_objects_sub_target",
+    "cxx_objects_sub_targets",
 )
 load(
     ":cxx_link_utility.bzl",
@@ -111,7 +109,6 @@ load(
 )
 load(
     ":link.bzl",
-    "CxxLinkResultType",
     "CxxLinkerMapData",
     "cxx_link_into",
 )
@@ -128,6 +125,14 @@ load(
     "get_link_group",
     "get_link_group_map_json",
     "get_link_group_preferred_linkage",
+    "is_link_group_shlib",
+)
+load(
+    ":link_types.bzl",
+    "CxxLinkResultType",
+    "LinkOptions",
+    "link_options",
+    "merge_link_options",
 )
 load(
     ":linker.bzl",
@@ -140,20 +145,20 @@ load(
 )
 
 CxxExecutableOutput = record(
-    binary = "artifact",
-    bitcode_bundle = field(["artifact", None], None),
-    dwp = field(["artifact", None]),
+    binary = Artifact,
+    bitcode_bundle = field([Artifact, None], None),
+    dwp = field([Artifact, None]),
     # Files that will likely need to be included as .hidden() arguments
     # when executing the executable (ex. RunInfo())
-    runtime_files = [ArgLike],
-    sub_targets = {str: [DefaultInfo.type]},
+    runtime_files = list[ArgLike],
+    sub_targets = dict[str, list[DefaultInfo.type]],
     # The LinkArgs used to create the final executable in 'binary'.
-    link_args = [LinkArgs.type],
+    link_args = list[LinkArgs.type],
     # External components needed to debug the executable.
     external_debug_info = field(ArtifactTSet.type, ArtifactTSet()),
-    shared_libs = {str: LinkedObject.type},
+    shared_libs = dict[str, LinkedObject.type],
     # All link group links that were generated in the executable.
-    auto_link_groups = field({str: LinkedObject.type}, {}),
+    auto_link_groups = field(dict[str, LinkedObject.type], {}),
     compilation_db = CxxCompilationDbInfo.type,
     xcode_data = XcodeDataInfo.type,
     linker_map_data = [CxxLinkerMapData.type, None],
@@ -193,11 +198,13 @@ def cxx_executable(ctx: AnalysisContext, impl_params: CxxRuleConstructorParams.t
     sub_targets[ARGSFILES_SUBTARGET] = [get_argsfiles_output(ctx, compile_cmd_output.argsfiles.relative, "argsfiles")]
     if absolute_path_prefix:
         sub_targets[ABS_ARGSFILES_SUBTARGET] = [get_argsfiles_output(ctx, compile_cmd_output.argsfiles.absolute, "abs-argsfiles")]
-    sub_targets[OBJECTS_SUBTARGET] = cxx_objects_sub_target(cxx_outs)
+    sub_targets[OBJECTS_SUBTARGET] = [DefaultInfo(sub_targets = cxx_objects_sub_targets(cxx_outs))]
 
     # Compilation DB.
-    comp_db = create_compilation_database(ctx, compile_cmd_output.comp_db_compile_cmds)
+    comp_db = create_compilation_database(ctx, compile_cmd_output.src_compile_cmds)
     sub_targets["compilation-database"] = [comp_db]
+
+    # comp_db_compile_cmds can include header files being compiled as C++ which should not be exposed in the [compilation-database] subtarget
     comp_db_info = make_compilation_db_info(compile_cmd_output.comp_db_compile_cmds, get_cxx_toolchain_info(ctx), get_cxx_platform_info(ctx))
 
     # Link deps
@@ -271,7 +278,9 @@ def cxx_executable(ctx: AnalysisContext, impl_params: CxxRuleConstructorParams.t
         # Although these aren't really deps, we need to search from the
         # extra link group roots to make sure we find additional libs
         # that should be linked into the main link group.
-        link_group_other_roots = [d.linkable_graph.nodes.value.label for d in impl_params.extra_link_roots if d.linkable_graph != None]
+        link_group_extra_link_roots = [d.linkable_graph.nodes.value.label for d in impl_params.extra_link_roots if d.linkable_graph != None]
+
+        exec_dep_roots = [d.linkable_graph.nodes.value.label for d in link_deps if d.linkable_graph != None]
 
         # If we're using auto-link-groups, where we generate the link group links
         # in the prelude, the link group map will give us the link group libs.
@@ -282,12 +291,12 @@ def cxx_executable(ctx: AnalysisContext, impl_params: CxxRuleConstructorParams.t
                 link_groups = link_groups,
                 link_group_mappings = link_group_mappings,
                 link_group_preferred_linkage = link_group_preferred_linkage,
-                executable_deps = [d.linkable_graph.nodes.value.label for d in link_deps if d.linkable_graph != None],
+                executable_deps = exec_dep_roots,
                 linker_flags = own_link_flags,
                 link_group_specs = impl_params.auto_link_group_specs,
                 root_link_group = link_group,
                 linkable_graph_node_map = linkable_graph_node_map,
-                other_roots = link_group_other_roots,
+                other_roots = link_group_extra_link_roots,
                 prefer_stripped_objects = impl_params.prefer_stripped_objects,
                 anonymous = ctx.attrs.anonymous_link_groups,
             )
@@ -323,12 +332,12 @@ def cxx_executable(ctx: AnalysisContext, impl_params: CxxRuleConstructorParams.t
             },
             link_style = link_style,
             roots = (
-                [d.linkable_graph.nodes.value.label for d in link_deps if d.linkable_graph != None] +
+                exec_dep_roots +
                 find_relevant_roots(
                     link_group = link_group,
                     linkable_graph_node_map = linkable_graph_node_map,
                     link_group_mappings = link_group_mappings,
-                    roots = link_group_other_roots,
+                    roots = link_group_extra_link_roots,
                 )
             ),
             is_executable_link = True,
@@ -385,28 +394,9 @@ def cxx_executable(ctx: AnalysisContext, impl_params: CxxRuleConstructorParams.t
             ),
         )
 
-        def is_link_group_shlib(label: Label):
-            # If this maps to a link group which we have a `LinkGroupLibInfo` for,
-            # then we'll handlet his below.
-            # buildifier: disable=uninitialized
-            if label in link_group_mappings and link_group_mappings[label] in link_group_libs:
-                return False
-
-            # buildifier: disable=uninitialized
-            if link_group_preferred_linkage.get(label, Linkage("any")) == Linkage("shared"):
-                return True
-
-            # if using link_groups, only materialize the link_group shlibs
-            # buildifier: disable=uninitialized
-            node_link = labels_to_links_map.get(label)
-            if node_link != None and node_link.link_style == LinkStyle("shared"):
-                return True
-
-            return False
-
         for name, shared_lib in traverse_shared_library_info(shlib_info).items():
             label = shared_lib.label
-            if not gnu_use_link_groups or is_link_group_shlib(label):
+            if not gnu_use_link_groups or is_link_group_shlib(label, link_group_mappings, link_group_libs, link_group_preferred_linkage, labels_to_links_map):
                 shared_libs[name] = shared_lib.lib
 
     if gnu_use_link_groups:
@@ -441,18 +431,21 @@ def cxx_executable(ctx: AnalysisContext, impl_params: CxxRuleConstructorParams.t
 
     link_result = _link_into_executable(
         ctx,
-        links,
         # If shlib lib tree generation is enabled, pass in the shared libs (which
         # will trigger the necessary link tree and link args).
         shared_libs if impl_params.exe_shared_libs_link_tree else {},
-        linker_info.link_weight,
         linker_info.binary_extension,
-        link_ordering = map_val(LinkOrdering, ctx.attrs.link_ordering),
-        link_execution_preference = link_execution_preference,
-        enable_distributed_thinlto = ctx.attrs.enable_distributed_thinlto,
-        strip = impl_params.strip_executable,
-        strip_args_factory = impl_params.strip_args_factory,
-        category_suffix = impl_params.exe_category_suffix,
+        link_options(
+            links = links,
+            link_weight = linker_info.link_weight,
+            link_ordering = map_val(LinkOrdering, ctx.attrs.link_ordering),
+            link_execution_preference = link_execution_preference,
+            enable_distributed_thinlto = ctx.attrs.enable_distributed_thinlto,
+            strip = impl_params.strip_executable,
+            strip_args_factory = impl_params.strip_args_factory,
+            category_suffix = impl_params.exe_category_suffix,
+            allow_cache_upload = impl_params.exe_allow_cache_upload,
+        ),
     )
     binary = link_result.exe
     runtime_files = link_result.runtime_files
@@ -476,7 +469,17 @@ def cxx_executable(ctx: AnalysisContext, impl_params: CxxRuleConstructorParams.t
     # - sub-sub-targets that reference shared library dependencies and their respective dwp
     # - [shared-libraries] - a json map that references the above rules.
     if shared_libs_symlink_tree:
-        sub_targets["rpath-tree"] = [DefaultInfo(default_output = shared_libs_symlink_tree)]
+        sub_targets["rpath-tree"] = [DefaultInfo(
+            default_output = shared_libs_symlink_tree,
+            other_outputs = [
+                lib.output
+                for lib in shared_libs.values()
+            ] + [
+                lib.dwp
+                for lib in shared_libs.values()
+                if lib.dwp
+            ],
+        )]
     sub_targets["shared-libraries"] = [DefaultInfo(
         default_output = ctx.actions.write_json(
             binary.output.basename + ".shared-libraries.json",
@@ -570,17 +573,18 @@ def cxx_executable(ctx: AnalysisContext, impl_params: CxxRuleConstructorParams.t
     # Provide a debug info target to make sure debug info is materialized.
     external_debug_info = make_artifact_tset(
         actions = ctx.actions,
-        label = ctx.label,
         children = (
             [binary.external_debug_info] +
             [s.external_debug_info for s in shared_libs.values()]
         ),
     )
+    materialize_external_debug_info = ctx.actions.write(
+        "debuginfo.artifacts",
+        project_artifacts(ctx.actions, [external_debug_info]),
+        with_inputs = True,
+    )
     sub_targets["debuginfo"] = [DefaultInfo(
-        other_outputs = project_artifacts(
-            actions = ctx.actions,
-            tsets = [external_debug_info],
-        ),
+        default_output = materialize_external_debug_info,
     )]
 
     return CxxExecutableOutput(
@@ -601,24 +605,17 @@ _CxxLinkExecutableResult = record(
     # The resulting executable
     exe = LinkedObject.type,
     # List of files/directories that should be present for executable to be run successfully
-    runtime_files = [ArgLike],
+    runtime_files = list[ArgLike],
     # Optional shared libs symlink tree symlinked_dir action
-    shared_libs_symlink_tree = ["artifact", None],
+    shared_libs_symlink_tree = [Artifact, None],
     linker_map_data = [CxxLinkerMapData.type, None],
 )
 
 def _link_into_executable(
         ctx: AnalysisContext,
-        links: list[LinkArgs.type],
         shared_libs: dict[str, LinkedObject.type],
-        link_weight: int,
         binary_extension: str,
-        link_execution_preference: LinkExecutionPreference.type = LinkExecutionPreference("any"),
-        enable_distributed_thinlto: bool = False,
-        strip: bool = False,
-        link_ordering: [LinkOrdering.type, None] = None,
-        strip_args_factory = None,
-        category_suffix: [str, None] = None) -> _CxxLinkExecutableResult.type:
+        opts: LinkOptions) -> _CxxLinkExecutableResult.type:
     output = ctx.actions.declare_output("{}{}".format(get_cxx_executable_product_name(ctx), "." + binary_extension if binary_extension else ""))
     extra_args, runtime_files, shared_libs_symlink_tree = executable_shared_lib_arguments(
         ctx.actions,
@@ -626,20 +623,15 @@ def _link_into_executable(
         output,
         shared_libs,
     )
-    links = [LinkArgs(flags = extra_args)] + links
 
     link_result = cxx_link_into(
         ctx = ctx,
         output = output,
-        links = links,
         result_type = CxxLinkResultType("executable"),
-        enable_distributed_thinlto = enable_distributed_thinlto,
-        category_suffix = category_suffix,
-        strip = strip,
-        strip_args_factory = strip_args_factory,
-        link_ordering = link_ordering,
-        link_weight = link_weight,
-        link_execution_preference = link_execution_preference,
+        opts = merge_link_options(
+            opts,
+            links = [LinkArgs(flags = extra_args)] + opts.links,
+        ),
     )
 
     return _CxxLinkExecutableResult(

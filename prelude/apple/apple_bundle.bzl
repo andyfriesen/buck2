@@ -14,6 +14,7 @@ load(
 load("@prelude//:paths.bzl", "paths")
 load("@prelude//apple:apple_toolchain_types.bzl", "AppleToolchainInfo", "AppleToolsInfo")
 # @oss-disable: load("@prelude//apple/meta_only:linker_outputs.bzl", "subtargets_for_apple_bundle_extra_outputs") 
+load("@prelude//apple/user:apple_selected_debug_path_file.bzl", "SELECTED_DEBUG_PATH_FILE_NAME")
 load("@prelude//apple/user:apple_selective_debugging.bzl", "AppleSelectiveDebuggingInfo")
 load(
     "@prelude//ide_integrations:xcode.bzl",
@@ -26,6 +27,10 @@ load(
     "LinkExecutionPreferenceInfo",
 )
 load("@prelude//utils:arglike.bzl", "ArgLike")
+load(
+    "@prelude//utils:set.bzl",
+    "set",
+)
 load(
     "@prelude//utils:utils.bzl",
     "expect",
@@ -42,6 +47,7 @@ load(":apple_sdk.bzl", "get_apple_sdk_name")
 load(":apple_universal_binaries.bzl", "create_universal_binary")
 load(
     ":debug.bzl",
+    "AggregatedAppleDebugInfo",
     "AppleDebuggableInfo",
     "get_aggregated_debug_info",
 )
@@ -58,19 +64,19 @@ AppleBundleDebuggableInfo = record(
     # Can be `None` for WatchKit stub
     binary_info = field([AppleDebuggableInfo.type, None]),
     # Debugable info of all bundle deps
-    dep_infos = field([AppleDebuggableInfo.type]),
+    dep_infos = field(list[AppleDebuggableInfo.type]),
     # Concat of `binary_info` and `dep_infos`
-    all_infos = field([AppleDebuggableInfo.type]),
+    all_infos = field(list[AppleDebuggableInfo.type]),
 )
 
 AppleBundlePartListConstructorParams = record(
     # The binaries/executables, required to create a bundle
-    binaries = field([AppleBundlePart.type]),
+    binaries = field(list[AppleBundlePart.type]),
 )
 
 AppleBundlePartListOutput = record(
     # The parts to be copied into an Apple bundle, *including* binaries
-    parts = field([AppleBundlePart.type]),
+    parts = field(list[AppleBundlePart.type]),
     # Part that holds the info.plist
     info_plist_part = field(AppleBundlePart.type),
 )
@@ -83,7 +89,7 @@ def _get_binary(ctx: AnalysisContext) -> AppleBundleBinaryOutput.type:
             is_watchkit_stub_binary = True,
         )
 
-    if ctx.attrs.universal:
+    if len(get_flattened_binary_deps(ctx)) > 1:
         if ctx.attrs.selective_debugging != None:
             fail("Selective debugging is not supported for universal binaries.")
         return create_universal_binary(
@@ -142,7 +148,7 @@ def _maybe_scrub_binary(ctx, binary_dep: Dependency) -> AppleBundleBinaryOutput.
 
     return AppleBundleBinaryOutput(binary = binary, debuggable_info = debuggable_info)
 
-def _get_scrubbed_binary_dsym(ctx, binary: "artifact", debug_info_tset: ArtifactTSet.type) -> "artifact":
+def _get_scrubbed_binary_dsym(ctx, binary: Artifact, debug_info_tset: ArtifactTSet.type) -> Artifact:
     debug_info = project_artifacts(
         actions = ctx.actions,
         tsets = [debug_info_tset],
@@ -155,7 +161,7 @@ def _get_scrubbed_binary_dsym(ctx, binary: "artifact", debug_info_tset: Artifact
     )
     return dsym_artifact
 
-def _get_binary_bundle_parts(ctx: AnalysisContext, binary_output: AppleBundleBinaryOutput.type) -> (list[AppleBundlePart.type], AppleBundlePart.type):
+def _get_binary_bundle_parts(ctx: AnalysisContext, binary_output: AppleBundleBinaryOutput.type, aggregated_debug_info: AggregatedAppleDebugInfo.type) -> (list[AppleBundlePart.type], AppleBundlePart.type):
     """Returns a tuple of all binary bundle parts and the primary bundle binary."""
     result = []
 
@@ -164,9 +170,14 @@ def _get_binary_bundle_parts(ctx: AnalysisContext, binary_output: AppleBundleBin
         result.append(AppleBundlePart(source = binary_output.binary, destination = AppleBundleDestination("watchkitstub"), new_name = "WK"))
     primary_binary_part = AppleBundlePart(source = binary_output.binary, destination = AppleBundleDestination("executables"), new_name = get_product_name(ctx))
     result.append(primary_binary_part)
+
+    selected_debug_target_part = _get_selected_debug_targets_part(ctx, aggregated_debug_info)
+    if selected_debug_target_part:
+        result.append(selected_debug_target_part)
+
     return result, primary_binary_part
 
-def _get_watch_kit_stub_artifact(ctx: AnalysisContext) -> "artifact":
+def _get_watch_kit_stub_artifact(ctx: AnalysisContext) -> Artifact:
     expect(ctx.attrs.binary == None, "Stub is useful only when binary is not set which means watchOS bundle is built.")
     stub_binary = ctx.attrs._apple_toolchain[AppleToolchainInfo].watch_kit_stub_binary
     if stub_binary == None:
@@ -177,8 +188,7 @@ def _apple_bundle_run_validity_checks(ctx: AnalysisContext):
     if ctx.attrs.extension == None:
         fail("`extension` attribute is required")
 
-def _get_debuggable_deps(ctx: AnalysisContext, binary_output: AppleBundleBinaryOutput.type, run_cmd: ArgLike) -> AppleBundleDebuggableInfo.type:
-    # `label` captures configuration as well, so it's safe to use for comparison purposes
+def _get_deps_debuggable_infos(ctx: AnalysisContext) -> list[AppleDebuggableInfo.type]:
     binary_labels = filter(None, [getattr(binary_dep, "label", None) for binary_dep in get_flattened_binary_deps(ctx)])
     deps_debuggable_infos = filter(
         None,
@@ -186,14 +196,12 @@ def _get_debuggable_deps(ctx: AnalysisContext, binary_output: AppleBundleBinaryO
         # in this case, do not duplicate the debugging info for the binary coming from two paths.
         [dep.get(AppleDebuggableInfo) for dep in ctx.attrs.deps if dep.label not in binary_labels],
     )
+    return deps_debuggable_infos
 
+def _get_bundle_binary_dsym_artifacts(ctx: AnalysisContext, binary_output: AppleBundleBinaryOutput.type, run_cmd: ArgLike) -> list[Artifact]:
     # We don't care to process the watchkit stub binary.
     if binary_output.is_watchkit_stub_binary:
-        return AppleBundleDebuggableInfo(
-            binary_info = None,
-            dep_infos = deps_debuggable_infos,
-            all_infos = deps_debuggable_infos,
-        )
+        return []
 
     if not ctx.attrs.split_arch_dsym:
         # Calling `dsymutil` on the correctly named binary in the _final bundle_ to yield dsym files
@@ -209,19 +217,26 @@ def _get_debuggable_deps(ctx: AnalysisContext, binary_output: AppleBundleBinaryO
             action_identifier = get_bundle_dir_name(ctx),
             output_path = _get_bundle_dsym_name(ctx),
         )
-        bundle_debuggable_info = AppleDebuggableInfo(
-            dsyms = [bundle_binary_dsym_artifact],
-            debug_info_tset = binary_debuggable_info.debug_info_tset,
-            filtered_map = binary_debuggable_info.filtered_map,
-        )
+        return [bundle_binary_dsym_artifact]
     else:
-        bundle_debuggable_info = binary_output.debuggable_info
+        return binary_output.debuggable_info.dsyms
 
-    return AppleBundleDebuggableInfo(
-        binary_info = bundle_debuggable_info,
-        dep_infos = deps_debuggable_infos,
-        all_infos = deps_debuggable_infos + ([bundle_debuggable_info] if bundle_debuggable_info else []),
-    )
+def _get_all_agg_debug_info(ctx: AnalysisContext, binary_output: AppleBundleBinaryOutput.type, deps_debuggable_infos: list[AppleDebuggableInfo.type]) -> AggregatedAppleDebugInfo.type:
+    all_debug_infos = deps_debuggable_infos
+    if not binary_output.is_watchkit_stub_binary:
+        binary_debuggable_info = binary_output.debuggable_info
+        all_debug_infos = all_debug_infos + [binary_debuggable_info]
+    return get_aggregated_debug_info(ctx, all_debug_infos)
+
+def _get_selected_debug_targets_part(ctx: AnalysisContext, agg_debug_info: AggregatedAppleDebugInfo.type) -> [AppleBundlePart.type, None]:
+    # Only app bundle need this, and this file is searched by FBReport at the bundle root
+    if ctx.attrs.extension == "app" and agg_debug_info.debug_info.filtered_map:
+        package_names = [label.package for label in agg_debug_info.debug_info.filtered_map.keys()]
+        package_names = set(package_names).list()
+        output = ctx.actions.write(SELECTED_DEBUG_PATH_FILE_NAME, package_names)
+        return AppleBundlePart(source = output, destination = AppleBundleDestination("bundleroot"), new_name = SELECTED_DEBUG_PATH_FILE_NAME)
+    else:
+        return None
 
 def get_apple_bundle_part_list(ctx: AnalysisContext, params: AppleBundlePartListConstructorParams.type) -> AppleBundlePartListOutput.type:
     resource_part_list = None
@@ -238,11 +253,15 @@ def get_apple_bundle_part_list(ctx: AnalysisContext, params: AppleBundlePartList
         info_plist_part = resource_part_list.info_plist_part,
     )
 
-def apple_bundle_impl(ctx: AnalysisContext) -> list["provider"]:
+def apple_bundle_impl(ctx: AnalysisContext) -> list[Provider]:
     _apple_bundle_run_validity_checks(ctx)
 
     binary_outputs = _get_binary(ctx)
-    all_binary_parts, primary_binary_part = _get_binary_bundle_parts(ctx, binary_outputs)
+
+    deps_debuggable_infos = _get_deps_debuggable_infos(ctx)
+    aggregated_debug_info = _get_all_agg_debug_info(ctx, binary_outputs, deps_debuggable_infos)
+
+    all_binary_parts, primary_binary_part = _get_binary_bundle_parts(ctx, binary_outputs, aggregated_debug_info)
     apple_bundle_part_list_output = get_apple_bundle_part_list(ctx, AppleBundlePartListConstructorParams(binaries = all_binary_parts))
 
     bundle = bundle_output(ctx)
@@ -250,6 +269,7 @@ def apple_bundle_impl(ctx: AnalysisContext) -> list["provider"]:
     primary_binary_rel_path = get_apple_bundle_part_relative_destination_path(ctx, primary_binary_part)
 
     sub_targets = assemble_bundle(ctx, bundle, apple_bundle_part_list_output.parts, apple_bundle_part_list_output.info_plist_part, SwiftStdlibArguments(primary_binary_rel_path = primary_binary_rel_path))
+    sub_targets.update(aggregated_debug_info.sub_targets)
 
     primary_binary_path = cmd_args([bundle, primary_binary_rel_path], delimiter = "/")
     run_cmd = cmd_args(primary_binary_path).hidden(bundle)
@@ -257,16 +277,13 @@ def apple_bundle_impl(ctx: AnalysisContext) -> list["provider"]:
     linker_maps_directory, linker_map_info = _linker_maps_data(ctx)
     sub_targets["linker-maps"] = [DefaultInfo(default_output = linker_maps_directory)]
 
-    bundle_debuggable_info = _get_debuggable_deps(ctx, binary_outputs, run_cmd)
+    # dsyms
+    binary_dsym_artifacts = _get_bundle_binary_dsym_artifacts(ctx, binary_outputs, run_cmd)
+    dep_dsym_artifacts = flatten([info.dsyms for info in deps_debuggable_infos])
 
-    binary_dsym_artifacts = getattr(bundle_debuggable_info.binary_info, "dsyms", [])
-    dep_dsym_artifacts = flatten([info.dsyms for info in bundle_debuggable_info.dep_infos])
     dsym_artifacts = binary_dsym_artifacts + dep_dsym_artifacts
     if dsym_artifacts:
         sub_targets[DSYM_SUBTARGET] = [DefaultInfo(default_outputs = dsym_artifacts)]
-
-    aggregated_debug_info = get_aggregated_debug_info(ctx, bundle_debuggable_info.all_infos, dsym_artifacts)
-    sub_targets.update(aggregated_debug_info.sub_targets)
 
     dsym_info = get_apple_dsym_info(ctx, binary_dsyms = binary_dsym_artifacts, dep_dsyms = dep_dsym_artifacts)
     sub_targets[DSYM_INFO_SUBTARGET] = [
@@ -298,7 +315,11 @@ def apple_bundle_impl(ctx: AnalysisContext) -> list["provider"]:
             contains_watchapp = is_any(lambda part: part.destination == AppleBundleDestination("watchapp"), apple_bundle_part_list_output.parts),
             skip_copying_swift_stdlib = ctx.attrs.skip_copying_swift_stdlib,
         ),
-        aggregated_debug_info.debug_info,
+        AppleDebuggableInfo(
+            dsyms = dsym_artifacts,
+            debug_info_tset = aggregated_debug_info.debug_info.debug_info_tset,
+            filtered_map = aggregated_debug_info.debug_info.filtered_map,
+        ),
         InstallInfo(
             installer = ctx.attrs._apple_toolchain[AppleToolchainInfo].installer,
             files = {
@@ -312,7 +333,7 @@ def apple_bundle_impl(ctx: AnalysisContext) -> list["provider"]:
         extra_output_provider,
     ]
 
-def _xcode_populate_attributes(ctx, processed_info_plist: "artifact") -> dict[str, ""]:
+def _xcode_populate_attributes(ctx, processed_info_plist: Artifact) -> dict[str, typing.Any]:
     data = {
         "deployment_version": get_bundle_min_target_version(ctx, get_default_binary_dep(ctx)),
         "info_plist": ctx.attrs.info_plist,
@@ -324,7 +345,7 @@ def _xcode_populate_attributes(ctx, processed_info_plist: "artifact") -> dict[st
     apple_xcode_data_add_xctoolchain(ctx, data)
     return data
 
-def _linker_maps_data(ctx: AnalysisContext) -> ("artifact", AppleBundleLinkerMapInfo.type):
+def _linker_maps_data(ctx: AnalysisContext) -> (Artifact, AppleBundleLinkerMapInfo.type):
     deps_with_binary = ctx.attrs.deps + get_flattened_binary_deps(ctx)
     deps_linker_map_infos = filter(
         None,
@@ -361,8 +382,8 @@ def _extra_output_provider(ctx: AnalysisContext) -> AppleBundleExtraOutputsInfo.
 def generate_install_data(
         ctx: AnalysisContext,
         plist_path: str,
-        populate_rule_specific_attributes_func: ["function", None] = None,
-        **kwargs) -> "artifact":
+        populate_rule_specific_attributes_func: [typing.Callable, None] = None,
+        **kwargs) -> Artifact:
     data = {
         "fullyQualifiedName": ctx.label,
         "info_plist": plist_path,

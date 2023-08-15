@@ -30,6 +30,7 @@ use crate::syntax::ast::AstStmt;
 use crate::syntax::ast::AstTypeExpr;
 use crate::syntax::ast::DefP;
 use crate::syntax::ast::Expr;
+use crate::syntax::ast::ForP;
 use crate::syntax::ast::Stmt;
 use crate::syntax::AstModule;
 
@@ -258,10 +259,7 @@ fn redundant(codemap: &CodeMap, x: &AstStmt, res: &mut Vec<LintT<FlowIssue>>) {
 
     fn f(codemap: &CodeMap, x: &AstStmt, res: &mut Vec<LintT<FlowIssue>>) {
         match &**x {
-            Stmt::For(_, over_body) => {
-                let (_over, body) = &**over_body;
-                check(true, codemap, body, res)
-            }
+            Stmt::For(ForP { body, .. }) => check(true, codemap, body, res),
             Stmt::Def(DefP { body, .. }) => check(false, codemap, body, res),
             _ => {}
         }
@@ -352,7 +350,7 @@ mod tests {
     fn test_lint_returns() {
         let m = module(
             r#"
-def no1() -> "string":
+def no1() -> str:
     pass
 def no2():
     if x:
@@ -362,12 +360,12 @@ def no3():
         return
     return 1
 def ok():
-    def no4() -> "int":
+    def no4() -> int:
         no4()
     pass
 def yes1():
     pass
-def yes2() -> "string":
+def yes2() -> str:
     yes1()
     if x:
         return "x"
@@ -377,7 +375,7 @@ def yes3():
     if x:
         return
     pass
-def yes4() -> "string":
+def yes4() -> str:
     fail("die")
 "#,
         );

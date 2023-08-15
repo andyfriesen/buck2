@@ -39,6 +39,7 @@ use starlark::values::dict::Dict;
 use starlark::values::tuple::TupleRef;
 use starlark::values::OwnedFrozenValue;
 use starlark::values::Value;
+use starlark::values::ValueTypedComplex;
 use thiserror::Error;
 
 use crate::actions::key::ActionKeyExt;
@@ -56,6 +57,7 @@ use crate::interpreter::rule_defs::artifact::StarlarkArtifact;
 use crate::interpreter::rule_defs::artifact::StarlarkArtifactValue;
 use crate::interpreter::rule_defs::artifact::StarlarkDeclaredArtifact;
 use crate::interpreter::rule_defs::context::AnalysisContext;
+use crate::interpreter::rule_defs::plugins::AnalysisPlugins;
 
 /// The artifacts that are returned are dynamic actions, which depend on the `DynamicLambda`
 /// to get their real `RegisteredAction`.
@@ -88,8 +90,6 @@ pub struct DynamicLambda {
     outputs: Vec<BuildArtifact>,
     /// A Starlark pair of the attributes and a lambda function that binds the outputs given a context
     attributes_lambda: OwnedFrozenValue,
-    /// Whether or not to evaluate the lambda with the BxlDynamicContext. Requires that the caller is BXL.
-    with_bxl: bool,
 }
 
 impl DynamicLambda {
@@ -98,7 +98,6 @@ impl DynamicLambda {
         dynamic: IndexSet<Artifact>,
         inputs: IndexSet<Artifact>,
         outputs: Vec<BuildArtifact>,
-        with_bxl: bool,
     ) -> Self {
         let mut depends = IndexSet::with_capacity(dynamic.len() + 1);
         match &owner {
@@ -119,7 +118,6 @@ impl DynamicLambda {
             inputs,
             outputs,
             attributes_lambda: Default::default(),
-            with_bxl,
         }
     }
 
@@ -199,17 +197,8 @@ impl Deferred for DynamicLambda {
         deferred_ctx: &mut dyn DeferredCtx,
         dice: &DiceComputations,
     ) -> anyhow::Result<DeferredValue<Self::Output>> {
-        let output = if self.with_bxl {
-            match &self.owner {
-                BaseDeferredKey::BxlLabel(key) => {
-                    eval_bxl_for_dynamic_output(key, self, deferred_ctx, dice).await
-                }
-                _ => {
-                    return Err(anyhow::anyhow!(
-                        "`with_bxl` was set to True, but `dynamic_output` was not called from BXL"
-                    ));
-                }
-            }
+        let output = if let BaseDeferredKey::BxlLabel(key) = &self.owner {
+            eval_bxl_for_dynamic_output(key, self, deferred_ctx, dice).await
         } else {
             let env = Module::new();
 
@@ -240,6 +229,7 @@ impl Deferred for DynamicLambda {
                             })
                         }
                     },
+                    dynamic_lambda_ctx_data.plugins,
                     dynamic_lambda_ctx_data.registry,
                     dynamic_lambda_ctx_data.digest_config,
                 ));
@@ -285,6 +275,7 @@ pub struct DynamicLambdaCtxData<'v> {
     pub attributes: Value<'v>,
     pub lambda: Value<'v>,
     pub outputs: Value<'v>,
+    pub plugins: ValueTypedComplex<'v, AnalysisPlugins<'v>>,
     pub artifacts: Value<'v>,
     pub key: &'v BaseDeferredKey,
     pub digest_config: DigestConfig,
@@ -308,9 +299,10 @@ pub fn dynamic_lambda_ctx_data<'v>(
             .owned_value(env.frozen_heap()),
     )
     .unwrap();
-    assert_eq!(data.len(), 2);
+    assert_eq!(data.len(), 3);
     let attributes = data.content()[0];
-    let lambda = data.content()[1];
+    let plugins = ValueTypedComplex::new(data.content()[1]).unwrap();
+    let lambda = data.content()[2];
 
     let execution_platform = {
         match &dynamic_lambda.owner {
@@ -377,6 +369,7 @@ pub fn dynamic_lambda_ctx_data<'v>(
     Ok(DynamicLambdaCtxData {
         attributes,
         lambda,
+        plugins,
         outputs: heap.alloc(outputs),
         artifacts: heap.alloc(artifacts),
         key: &dynamic_lambda.owner,

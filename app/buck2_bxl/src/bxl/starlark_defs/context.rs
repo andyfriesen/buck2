@@ -23,12 +23,12 @@ use buck2_artifact::artifact::build_artifact::BuildArtifact;
 use buck2_build_api::actions::artifact::get_artifact_fs::GetArtifactFs;
 use buck2_build_api::analysis::registry::AnalysisRegistry;
 use buck2_build_api::artifact_groups::ArtifactGroup;
-use buck2_build_api::bxl::execution_platform::EXECUTION_PLATFORM;
 use buck2_build_api::deferred::types::DeferredCtx;
 use buck2_build_api::dynamic::bxl::EVAL_BXL_FOR_DYNAMIC_OUTPUT;
 use buck2_build_api::dynamic::deferred::dynamic_lambda_ctx_data;
 use buck2_build_api::dynamic::deferred::DynamicLambda;
 use buck2_build_api::interpreter::rule_defs::context::AnalysisActions;
+use buck2_build_api::interpreter::rule_defs::plugins::AnalysisPlugins;
 use buck2_cli_proto::build_request::Materializations;
 use buck2_common::dice::cells::HasCellResolver;
 use buck2_common::dice::data::HasIoProvider;
@@ -70,6 +70,7 @@ use either::Either;
 use indexmap::IndexSet;
 use itertools::Itertools;
 use starlark::any::ProvidesStaticType;
+use starlark::collections::SmallMap;
 use starlark::environment::Methods;
 use starlark::environment::MethodsBuilder;
 use starlark::environment::MethodsStatic;
@@ -86,13 +87,12 @@ use starlark::values::NoSerialize;
 use starlark::values::StarlarkValue;
 use starlark::values::Trace;
 use starlark::values::Value;
-use starlark::values::ValueOf;
 use starlark::values::ValueOfUnchecked;
 use starlark::values::ValueTyped;
 use starlark::StarlarkDocs;
-use starlark_map::small_map::SmallMap;
 use thiserror::Error;
 
+use crate::bxl::key::BxlDynamicKey;
 use crate::bxl::key::BxlKey;
 use crate::bxl::starlark_defs::alloc_node::AllocNode;
 use crate::bxl::starlark_defs::audit::StarlarkAuditCtx;
@@ -140,20 +140,27 @@ pub(crate) struct RootBxlContextData<'v> {
     materializations: Arc<DashMap<BuildArtifact, ()>>,
 }
 
+/// Data object for `BxlContextType::Dynamic`.
+#[derive(ProvidesStaticType, Trace, Allocative, Debug, Derivative)]
+pub(crate) struct DynamicBxlContextData {
+    exec_deps: Vec<ConfiguredProvidersLabel>,
+    toolchains: Vec<ConfiguredProvidersLabel>,
+}
+
 /// Environment-specific fields of `BxlContext`.
 #[derive(ProvidesStaticType, Trace, NoSerialize, Allocative, Debug, Derivative)]
 pub(crate) enum BxlContextType<'v> {
     /// Context passed to `ctx` parameter to BXL entry function
     Root(RootBxlContextData<'v>),
     /// Context passed to `ctx` parameter to the dynamic lambda entry function
-    Dynamic,
+    Dynamic(DynamicBxlContextData),
 }
 
 impl<'v> BxlContextType<'v> {
     fn unpack_root(&self) -> anyhow::Result<&'v RootBxlContextData> {
         match &self {
             BxlContextType::Root(root) => Ok(root),
-            BxlContextType::Dynamic => Err(anyhow::anyhow!("Expected root BXL context type")),
+            BxlContextType::Dynamic(_) => Err(anyhow::anyhow!("Expected root BXL context type")),
         }
     }
 }
@@ -164,7 +171,7 @@ impl<'v> Display for BxlContextType<'v> {
             BxlContextType::Root { .. } => {
                 write!(f, "root")
             }
-            BxlContextType::Dynamic => {
+            BxlContextType::Dynamic(_) => {
                 write!(f, "dynamic")
             }
         }
@@ -256,6 +263,9 @@ impl<'v> BxlContext<'v> {
                 state: RefCell::new(None),
                 // TODO(nga): attributes struct should not be accessible to BXL.
                 attributes: ValueOfUnchecked::new_checked(heap.alloc(AllocStruct::EMPTY)).unwrap(),
+                plugins: heap
+                    .alloc_typed(AnalysisPlugins::new(SmallMap::new()))
+                    .into(),
                 digest_config,
             }),
             global_target_platform,
@@ -277,6 +287,7 @@ impl<'v> BxlContext<'v> {
         digest_config: DigestConfig,
         global_target_platform: Option<TargetLabel>,
         analysis_registry: AnalysisRegistry<'v>,
+        dynamic_data: DynamicBxlContextData,
     ) -> anyhow::Result<Self> {
         let cell_root_abs = project_fs.root().join(
             cell_resolver
@@ -296,10 +307,13 @@ impl<'v> BxlContext<'v> {
                 state: RefCell::new(Some(analysis_registry)),
                 // TODO(nga): attributes struct should not be accessible to BXL.
                 attributes: ValueOfUnchecked::new_checked(heap.alloc(AllocStruct::EMPTY)).unwrap(),
+                plugins: heap
+                    .alloc_typed(AnalysisPlugins::new(SmallMap::new()))
+                    .into(),
                 digest_config,
             }),
             global_target_platform,
-            context_type: BxlContextType::Dynamic,
+            context_type: BxlContextType::Dynamic(dynamic_data),
             project_fs,
             artifact_fs,
         })
@@ -309,7 +323,7 @@ impl<'v> BxlContext<'v> {
     pub(crate) fn print_to_error_stream(&self, msg: String) -> anyhow::Result<()> {
         match &self.context_type {
             BxlContextType::Root(root) => writeln!(root.error_stream.sink.borrow_mut(), "{}", msg)?,
-            BxlContextType::Dynamic => console_message(msg),
+            BxlContextType::Dynamic(_) => console_message(msg),
         }
         Ok(())
     }
@@ -405,7 +419,13 @@ pub(crate) async fn eval_bxl_for_dynamic_output<'v>(
     // TODO(wendyy) emit telemetry, support profiler
     let env = Module::new();
     let liveness = deferred_ctx.liveness();
-    let key = BxlKey::from_base_deferred_key_dyn_impl_err(base_deferred_key.clone())?;
+    let dynamic_key =
+        BxlDynamicKey::from_base_deferred_key_dyn_impl_err(base_deferred_key.clone())?;
+    let key = dynamic_key.key();
+    let dynamic_data = DynamicBxlContextData {
+        exec_deps: dynamic_key.0.exec_deps.clone(),
+        toolchains: dynamic_key.0.toolchains.clone(),
+    };
     let global_target_platform = key.global_target_platform().dupe();
     let async_ctx: BxlSafeDiceComputations<'_> =
         BxlSafeDiceComputations::new(dice_ctx.dupe(), liveness);
@@ -450,7 +470,7 @@ pub(crate) async fn eval_bxl_for_dynamic_output<'v>(
                         dice_ctx,
                         &mut StarlarkProfilerOrInstrumentation::disabled(),
                         format!("bxl_dynamic:{}", "foo"),
-                        move |provider| {
+                        move |provider, _| {
                             tokio::task::block_in_place(|| {
                                 let mut eval = provider.make(&env)?;
                                 eval.set_print_handler(&print);
@@ -474,6 +494,7 @@ pub(crate) async fn eval_bxl_for_dynamic_output<'v>(
                                         digest_config,
                                         global_target_platform,
                                         dynamic_lambda_ctx_data.registry,
+                                        dynamic_data,
                                     )?;
 
                                     let ctx = ValueTyped::<BxlContext>::new(
@@ -593,6 +614,17 @@ fn context_methods(builder: &mut MethodsBuilder) {
             .to_owned())
     }
 
+    /// Returns the absolute path to the cell of the repository
+    ///
+    /// This function is not available on the `bxl_ctx` when called from `dynamic_output`.
+    fn cell_root<'v>(this: &'v BxlContext<'v>) -> anyhow::Result<String> {
+        let _root_type = this
+            .context_type
+            .unpack_root()
+            .context(BxlContextDynamicError::Unsupported("root".to_owned()))?;
+        Ok(this.cell_root_abs.to_owned().to_string())
+    }
+
     /// Gets the target nodes for the `labels`, accepting an optional `target_platform` which is the
     /// target platform configuration used to resolve configurations of any unconfigured target
     /// nodes.
@@ -630,6 +662,7 @@ fn context_methods(builder: &mut MethodsBuilder) {
                     labels,
                     &target_platform,
                     this,
+                    ctx,
                     eval,
                 )
                 .await?
@@ -682,7 +715,7 @@ fn context_methods(builder: &mut MethodsBuilder) {
     ) -> anyhow::Result<Value<'v>> {
         let res: anyhow::Result<Value<'v>> = this.async_ctx.via_dice(|ctx| async move {
             Ok(
-                match TargetExpr::<'v, TargetNode>::unpack(labels, this, eval).await? {
+                match TargetExpr::<'v, TargetNode>::unpack(labels, this, ctx, eval).await? {
                     TargetExpr::Label(label) => {
                         let node = ctx.get_target_node(&label).await?;
 
@@ -714,11 +747,13 @@ fn context_methods(builder: &mut MethodsBuilder) {
     ///
     /// Note that this function does not check that this subtarget exists in the repo.
     fn unconfigured_sub_targets<'v>(
-        this: &'v BxlContext<'v>,
+        this: &BxlContext<'v>,
         labels: Value<'v>,
         eval: &mut Evaluator<'v, '_>,
     ) -> anyhow::Result<Value<'v>> {
-        let providers = ProvidersExpr::<ProvidersLabel>::unpack(labels, this, eval)?;
+        let providers = this
+            .async_ctx
+            .via_dice(|_| ProvidersExpr::<ProvidersLabel>::unpack(labels, this, eval))?;
 
         let res = match providers {
             ProvidersExpr::Literal(provider) => {
@@ -773,7 +808,7 @@ fn context_methods(builder: &mut MethodsBuilder) {
     /// marked by ensure will be built.
     ///
     /// Sample usage:
-    /// ```text
+    /// ```python
     /// def _impl_write_action(ctx):
     ///     bxl_actions = ctx.bxl_actions()
     ///     output = bxl_actions.actions.write("my_output", "my_content")
@@ -790,6 +825,26 @@ fn context_methods(builder: &mut MethodsBuilder) {
     /// `exec_compatible_with` - Explicit list of configuration nodes (like platforms or constraints)
     /// that these actions are compatible with. This is the 'exec_compatible_with' attribute of a target.
     ///
+    /// If you passed in `exec_deps` or `toolchains`, you can access the resolved dependencies using the `exec_deps`
+    /// and `toolchains` attributes on the `bxl_actions`, which both return a `dict` of unconfigured subtarget labels
+    /// and their configured/resolved `dependency` objects.
+    ///
+    /// ```python
+    /// def _impl_run_action(ctx):
+    ///    my_exec_dep = ctx.unconfigured_sub_targets("foo//bar:baz") # has some provider that you would use in the action
+    ///    bxl_actions = ctx.bxl_actions(exec_deps = [my_exec_dep]) # call once, reuse wherever needed
+    ///    output = bxl_actions.actions.run(
+    ///        [
+    ///            "python3",
+    ///            bxl_actions.exec_deps[my_exec_dep][RunInfo], # access resolved exec_deps on the `bxl_actions`
+    ///            out.as_output(),
+    ///        ],
+    ///        category = "command",
+    ///        local_only = True,
+    ///    )
+    ///    ctx.output.ensure(output)
+    /// ```
+    ///
     /// When called from a `dynamic_output`, `bxl_actions()` cannot be configured with a different execution
     /// platform resolution from the parent BXL.
     fn bxl_actions<'v>(
@@ -800,9 +855,9 @@ fn context_methods(builder: &mut MethodsBuilder) {
         #[starlark(require = named, default = NoneType)] exec_compatible_with: Value<'v>,
         eval: &mut Evaluator<'v, '_>,
     ) -> anyhow::Result<BxlActions<'v>> {
-        let (exec_deps, toolchains) = match this.context_type {
-            BxlContextType::Root { .. } => {
-                let execution_resolution = this.async_ctx.via_dice(|ctx| async {
+        this.async_ctx.via_dice(|ctx| async {
+            let (exec_deps, toolchains) = match &this.context_type {
+                BxlContextType::Root { .. } => {
                     let target_platform = target_platform.parse_target_platforms(
                         &this.target_alias_resolver,
                         &this.cell_resolver,
@@ -813,7 +868,8 @@ fn context_methods(builder: &mut MethodsBuilder) {
                     let exec_deps = if exec_deps.is_none() {
                         Vec::new()
                     } else {
-                        ProvidersExpr::<ProvidersLabel>::unpack(exec_deps, this, eval)?
+                        ProvidersExpr::<ProvidersLabel>::unpack(exec_deps, this, eval)
+                            .await?
                             .labels()
                             .cloned()
                             .collect()
@@ -822,7 +878,8 @@ fn context_methods(builder: &mut MethodsBuilder) {
                     let toolchains = if toolchains.is_none() {
                         Vec::new()
                     } else {
-                        ProvidersExpr::<ProvidersLabel>::unpack(toolchains, this, eval)?
+                        ProvidersExpr::<ProvidersLabel>::unpack(toolchains, this, eval)
+                            .await?
                             .labels()
                             .cloned()
                             .collect()
@@ -831,7 +888,7 @@ fn context_methods(builder: &mut MethodsBuilder) {
                     let exec_compatible_with = if exec_compatible_with.is_none() {
                         Vec::new()
                     } else {
-                        TargetExpr::<TargetNode>::unpack(exec_compatible_with, this, eval)
+                        TargetExpr::<TargetNode>::unpack(exec_compatible_with, this, ctx, eval)
                             .await?
                             .get(ctx)
                             .await?
@@ -840,80 +897,47 @@ fn context_methods(builder: &mut MethodsBuilder) {
                             .collect()
                     };
 
-                    resolve_bxl_execution_platform(
+                    let execution_resolution = resolve_bxl_execution_platform(
                         ctx,
                         this.cell_name,
                         exec_deps,
                         toolchains,
-                        target_platform,
-                        exec_compatible_with,
+                        target_platform.clone(),
+                        exec_compatible_with.clone(),
                         eval.module(),
                     )
-                    .await
-                })?;
+                    .await?;
 
-                validate_action_instantiation(this, execution_resolution.resolved_execution)?;
+                    validate_action_instantiation(this, &execution_resolution)?;
 
-                let exec_deps = eval.heap().alloc(Dict::new(
-                    execution_resolution
-                        .exec_deps_configured
-                        .into_iter()
-                        .map(|(k, v)| {
-                            Ok((
-                                eval.heap()
-                                    .alloc(StarlarkProvidersLabel::new(k))
-                                    .get_hashed()?,
-                                eval.heap().alloc(v),
-                            ))
-                        })
-                        .collect::<anyhow::Result<_>>()?,
-                ));
-                let exec_deps = ValueOfUnchecked::new_checked(exec_deps)?;
-                let toolchains = eval.heap().alloc(Dict::new(
-                    execution_resolution
-                        .toolchain_deps_configured
-                        .into_iter()
-                        .map(|(k, v)| {
-                            Ok((
-                                eval.heap()
-                                    .alloc(StarlarkProvidersLabel::new(k))
-                                    .get_hashed()?,
-                                eval.heap().alloc(v),
-                            ))
-                        })
-                        .collect::<anyhow::Result<_>>()?,
-                ));
-                let toolchains = ValueOfUnchecked::new_checked(toolchains)?;
-
-                (exec_deps, toolchains)
-            }
-            BxlContextType::Dynamic => {
-                if !exec_deps.is_none()
-                    || !toolchains.is_none()
-                    || !target_platform.is_none()
-                    || !exec_compatible_with.is_none()
-                {
-                    return Err(BxlContextDynamicError::RequireSameExecutionPlatformAsRoot.into());
+                    (
+                        execution_resolution.exec_deps_configured,
+                        execution_resolution.toolchain_deps_configured,
+                    )
                 }
-                // TODO(@wendyy) - make these accessible. Users need to create a providers label currently
-                let exec_deps = eval.heap().alloc(Dict::new(SmallMap::new()));
-                let toolchains = eval.heap().alloc(Dict::new(SmallMap::new()));
-                (
-                    ValueOfUnchecked::new_checked(exec_deps)?,
-                    ValueOfUnchecked::new_checked(toolchains)?,
-                )
-            }
-        };
+                BxlContextType::Dynamic(data) => {
+                    if !exec_deps.is_none()
+                        || !toolchains.is_none()
+                        || !target_platform.is_none()
+                        || !exec_compatible_with.is_none()
+                    {
+                        return Err(
+                            BxlContextDynamicError::RequireSameExecutionPlatformAsRoot.into()
+                        );
+                    }
+                    (data.exec_deps.clone(), data.toolchains.clone())
+                }
+            };
 
-        Ok(BxlActions::new(this.state, exec_deps, toolchains))
-    }
-
-    /// DO NOT USE - will be deprecated soon.
-    #[starlark(attribute)]
-    fn actions_factory<'v>(this: ValueOf<'v, &'v BxlContext<'v>>) -> anyhow::Result<Value<'v>> {
-        validate_action_instantiation(this.typed, EXECUTION_PLATFORM.dupe())?;
-
-        Ok(this.typed.state.to_value())
+            BxlActions::new(
+                this.state,
+                exec_deps.to_vec(),
+                toolchains.to_vec(),
+                eval,
+                ctx,
+            )
+            .await
+        })
     }
 
     /// Runs analysis on the given `labels`, accepting an optional `target_platform` which is the
@@ -933,18 +957,23 @@ fn context_methods(builder: &mut MethodsBuilder) {
     /// or a dict keyed by sub target labels of [`StarlarkAnalysisResult`] if the given `labels`
     /// is list-like
     fn analysis<'v>(
-        this: &'v BxlContext<'v>,
+        this: &BxlContext<'v>,
         labels: Value<'v>,
         #[starlark(default = NoneType)] target_platform: Value<'v>,
-        #[starlark(default = true)] skip_incompatible: bool,
+        #[starlark(require = named, default = true)] skip_incompatible: bool,
         eval: &mut Evaluator<'v, '_>,
     ) -> anyhow::Result<Value<'v>> {
-        let providers =
-            ProvidersExpr::<ConfiguredProvidersLabel>::unpack(labels, target_platform, this, eval)?;
-
-        let res: anyhow::Result<_> = this
-            .async_ctx
-            .via_dice(|ctx| analysis::analysis(ctx, providers, skip_incompatible));
+        let res: anyhow::Result<_> = this.async_ctx.via_dice(|dice| async {
+            let providers = ProvidersExpr::<ConfiguredProvidersLabel>::unpack(
+                labels,
+                target_platform,
+                this,
+                dice,
+                eval,
+            )
+            .await?;
+            analysis::analysis(dice, this, providers, skip_incompatible).await
+        });
 
         Ok(match res? {
             Either::Left(single) => eval.heap().alloc(single),

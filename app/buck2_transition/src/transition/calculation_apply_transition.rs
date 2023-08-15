@@ -136,7 +136,7 @@ async fn do_apply_transition(
         ctx,
         &mut StarlarkProfilerOrInstrumentation::disabled(),
         format!("transition:{}", transition_id),
-        move |provider| {
+        move |provider, _| {
             let mut eval = provider.make(&module)?;
             eval.set_print_handler(&print);
             let refs = module.heap().alloc(AllocStruct(refs));
@@ -281,7 +281,7 @@ impl TransitionCalculation for TransitionCalculationImpl {
 
             async fn compute(
                 &self,
-                ctx: &DiceComputations,
+                ctx: &mut DiceComputations,
                 _cancellation: &CancellationContext,
             ) -> Self::Value {
                 let v: SharedResult<_> = try {

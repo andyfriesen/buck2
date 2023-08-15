@@ -21,6 +21,7 @@ use buck2_build_api::actions::impls::run_action_knobs::HasRunActionKnobs;
 use buck2_build_api::analysis::calculation::RuleAnalysisCalculation;
 use buck2_build_api::artifact_groups::calculation::ArtifactGroupCalculation;
 use buck2_build_api::artifact_groups::ArtifactGroup;
+use buck2_build_api::interpreter::rule_defs::cmd_args::space_separated::SpaceSeparatedCommandLineBuilder;
 use buck2_build_api::interpreter::rule_defs::cmd_args::AbsCommandLineContext;
 use buck2_build_api::interpreter::rule_defs::cmd_args::CommandLineArgLike;
 use buck2_build_api::interpreter::rule_defs::cmd_args::CommandLineArtifactVisitor;
@@ -263,7 +264,7 @@ impl<'a> BuckTestOrchestrator<'a> {
                 )
                 .await?
             };
-            // Some timeout is neeeded, use the same value as for the test itself which is better than nothing.
+            // If some timeout is neeeded, use the same value as for the test itself which is better than nothing.
             let resources = self
                 .setup_local_resources(setup_contexts, setup_local_resources_executor, timeout)
                 .await?;
@@ -594,6 +595,8 @@ impl<'b> BuckTestOrchestrator<'b> {
                 },
             rejected_execution: _,
             did_cache_upload: _,
+            did_dep_file_cache_upload: _,
+            dep_file_key: _,
             eligible_for_full_hybrid: _,
         } = match metadata {
             DisplayMetadata::Listing(listing) => {
@@ -924,14 +927,13 @@ impl<'b> BuckTestOrchestrator<'b> {
         &self,
         setup_contexts: Vec<LocalResourceSetupContext>,
         executor: CommandExecutor,
-        timeout: Duration,
+        default_timeout: Duration,
     ) -> Result<Vec<LocalResourceState>, ExecuteError> {
-        let setup_commands = futures::future::try_join_all(
-            setup_contexts
-                .into_iter()
-                .map(|context| self.prepare_local_resource(context, executor.fs(), timeout)),
-        )
-        .await?;
+        let setup_commands =
+            futures::future::try_join_all(setup_contexts.into_iter().map(|context| {
+                self.prepare_local_resource(context, executor.fs(), default_timeout)
+            }))
+            .await?;
 
         self.require_alive().await?;
 
@@ -975,7 +977,7 @@ impl<'b> BuckTestOrchestrator<'b> {
         &self,
         context: LocalResourceSetupContext,
         fs: &ArtifactFs,
-        timeout: Duration,
+        default_timeout: Duration,
     ) -> anyhow::Result<PreparedLocalResourceSetupContext> {
         let futs = context
             .input_artifacts
@@ -989,7 +991,8 @@ impl<'b> BuckTestOrchestrator<'b> {
         let paths = CommandExecutionPaths::new(inputs, indexset![], fs, self.digest_config)?;
         let mut execution_request =
             CommandExecutionRequest::new(vec![], context.cmd, paths, Default::default());
-        execution_request = execution_request.with_timeout(timeout);
+        execution_request =
+            execution_request.with_timeout(context.timeout.unwrap_or(default_timeout));
         Ok(PreparedLocalResourceSetupContext {
             target: context.target,
             execution_request,
@@ -1041,6 +1044,8 @@ impl<'b> BuckTestOrchestrator<'b> {
                 },
             rejected_execution: _,
             did_cache_upload: _,
+            did_dep_file_cache_upload: _,
+            dep_file_key: _,
             eligible_for_full_hybrid: _,
         } = execution_result;
 
@@ -1128,7 +1133,7 @@ impl<'a> Execute2RequestExpander<'a> {
 
         let env_for_interpolation = self.test_info.env().collect::<HashMap<_, _>>();
 
-        let expand_arg_value = |cli: &mut Vec<String>,
+        let expand_arg_value = |cli: &mut dyn CommandLineBuilder,
                                 ctx: &mut dyn CommandLineContext,
                                 artifact_visitor: &mut dyn CommandLineArtifactVisitor,
                                 declared_outputs: &mut IndexMap<
@@ -1193,17 +1198,16 @@ impl<'a> Execute2RequestExpander<'a> {
             .env
             .into_iter()
             .map(|(k, v)| {
-                let mut env = Vec::<String>::new();
+                let mut env = String::new();
                 let mut ctx = B::new(self.fs);
                 expand_arg_value(
-                    &mut env,
+                    &mut SpaceSeparatedCommandLineBuilder::wrap_string(&mut env),
                     &mut ctx,
                     &mut artifact_visitor,
                     self.declared_outputs,
                     v,
                 )?;
-                // TODO (torozco): Just use a String directly
-                anyhow::Ok((k, env.join(" ")))
+                anyhow::Ok((k, env))
             })
             .collect::<Result<SortedVectorMap<_, _>, _>>()?;
 

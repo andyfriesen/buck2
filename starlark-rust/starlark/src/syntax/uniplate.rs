@@ -22,6 +22,7 @@
 #![allow(clippy::redundant_closure)]
 
 use crate::syntax::ast::AssignP;
+use crate::syntax::ast::AssignTargetP;
 use crate::syntax::ast::AstAssignIdentP;
 use crate::syntax::ast::AstExprP;
 use crate::syntax::ast::AstPayload;
@@ -31,6 +32,7 @@ use crate::syntax::ast::ClauseP;
 use crate::syntax::ast::DefP;
 use crate::syntax::ast::ExprP;
 use crate::syntax::ast::ForClauseP;
+use crate::syntax::ast::ForP;
 use crate::syntax::ast::LambdaP;
 use crate::syntax::ast::ParameterP;
 use crate::syntax::ast::StmtP;
@@ -65,6 +67,38 @@ impl<'a, P: AstPayload> Visit<'a, P> {
     }
 }
 
+impl<P: AstPayload> DefP<P> {
+    fn visit_children<'a>(&'a self, mut f: impl FnMut(Visit<'a, P>)) {
+        let DefP {
+            name: _,
+            params,
+            return_type,
+            body,
+            payload: _,
+        } = self;
+        params
+            .iter()
+            .for_each(|x| x.visit_expr(|x| f(Visit::Expr(x))));
+        return_type
+            .iter()
+            .for_each(|x| x.visit_expr(|x| f(Visit::Expr(x))));
+        f(Visit::Stmt(body));
+    }
+
+    pub(crate) fn visit_children_err<'a, E>(
+        &'a self,
+        mut f: impl FnMut(Visit<'a, P>) -> Result<(), E>,
+    ) -> Result<(), E> {
+        let mut result = Ok(());
+        self.visit_children(|x| {
+            if result.is_ok() {
+                result = f(x);
+            }
+        });
+        result
+    }
+}
+
 impl<P: AstPayload> StmtP<P> {
     pub(crate) fn visit_children<'a>(&'a self, mut f: impl FnMut(Visit<'a, P>)) {
         match self {
@@ -79,24 +113,9 @@ impl<P: AstPayload> StmtP<P> {
                 f(Visit::Stmt(then_block));
                 f(Visit::Stmt(else_block));
             }
-            StmtP::Def(DefP {
-                name: _,
-                params,
-                return_type,
-                body,
-                payload: _,
-            }) => {
-                params
-                    .iter()
-                    .for_each(|x| x.visit_expr(|x| f(Visit::Expr(x))));
-                return_type
-                    .iter()
-                    .for_each(|x| x.visit_expr(|x| f(Visit::Expr(x))));
-                f(Visit::Stmt(body));
-            }
-            StmtP::For(lhs, over_body) => {
-                let (over, body) = &**over_body;
-                lhs.visit_expr(|x| f(Visit::Expr(x)));
+            StmtP::Def(def) => def.visit_children(f),
+            StmtP::For(ForP { var, over, body }) => {
+                var.visit_expr(|x| f(Visit::Expr(x)));
                 f(Visit::Expr(over));
                 f(Visit::Stmt(body));
             }
@@ -108,8 +127,7 @@ impl<P: AstPayload> StmtP<P> {
                 ret.iter().for_each(|x| f(Visit::Expr(x)));
             }
             StmtP::Expression(e) => f(Visit::Expr(e)),
-            StmtP::Assign(lhs, ty_rhs) => {
-                let (ty, rhs) = &**ty_rhs;
+            StmtP::Assign(AssignP { lhs, ty, rhs }) => {
                 lhs.visit_expr(|x| f(Visit::Expr(x)));
                 ty.iter().for_each(|x| x.visit_expr(|x| f(Visit::Expr(x))));
                 f(Visit::Expr(rhs));
@@ -150,9 +168,8 @@ impl<P: AstPayload> StmtP<P> {
                     .for_each(|x| x.visit_expr_mut(|x| f(VisitMut::Expr(x))));
                 f(VisitMut::Stmt(body));
             }
-            StmtP::For(lhs, over_body) => {
-                let (over, body) = &mut **over_body;
-                lhs.visit_expr_mut(|x| f(VisitMut::Expr(x)));
+            StmtP::For(ForP { var, over, body }) => {
+                var.visit_expr_mut(|x| f(VisitMut::Expr(x)));
                 f(VisitMut::Expr(over));
                 f(VisitMut::Stmt(body));
             }
@@ -164,8 +181,7 @@ impl<P: AstPayload> StmtP<P> {
                 ret.iter_mut().for_each(|x| f(VisitMut::Expr(x)));
             }
             StmtP::Expression(e) => f(VisitMut::Expr(e)),
-            StmtP::Assign(lhs, ty_rhs) => {
-                let (ty, rhs) = &mut **ty_rhs;
+            StmtP::Assign(AssignP { lhs, ty, rhs }) => {
                 lhs.visit_expr_mut(|x| f(VisitMut::Expr(x)));
                 ty.iter_mut()
                     .for_each(|x| x.visit_expr_mut(|x| f(VisitMut::Expr(x))));
@@ -229,6 +245,19 @@ impl<P: AstPayload> StmtP<P> {
             }
         }
         self.visit_children(|x| pick(x, &mut f))
+    }
+
+    pub(crate) fn visit_expr_result<'a, E>(
+        &'a self,
+        mut f: impl FnMut(&'a AstExprP<P>) -> Result<(), E>,
+    ) -> Result<(), E> {
+        let mut result = Ok(());
+        self.visit_expr(|x| {
+            if result.is_ok() {
+                result = f(x);
+            }
+        });
+        result
     }
 
     pub(crate) fn visit_stmt_result<E>(
@@ -486,18 +515,21 @@ impl<P: AstPayload> TypeExprP<P> {
     }
 }
 
-impl<P: AstPayload> AssignP<P> {
+impl<P: AstPayload> AssignTargetP<P> {
     pub(crate) fn visit_expr<'a>(&'a self, mut f: impl FnMut(&'a AstExprP<P>)) {
-        fn recurse<'a, P: AstPayload>(x: &'a AssignP<P>, f: &mut impl FnMut(&'a AstExprP<P>)) {
+        fn recurse<'a, P: AstPayload>(
+            x: &'a AssignTargetP<P>,
+            f: &mut impl FnMut(&'a AstExprP<P>),
+        ) {
             match x {
-                AssignP::Tuple(xs) => xs.iter().for_each(|x| recurse(x, f)),
-                AssignP::Dot(a, _) => f(a),
-                AssignP::Index(a_b) => {
+                AssignTargetP::Tuple(xs) => xs.iter().for_each(|x| recurse(x, f)),
+                AssignTargetP::Dot(a, _) => f(a),
+                AssignTargetP::Index(a_b) => {
                     let (a, b) = &**a_b;
                     f(a);
                     f(b);
                 }
-                AssignP::Identifier(..) => {}
+                AssignTargetP::Identifier(..) => {}
             }
         }
         recurse(self, &mut f)
@@ -505,18 +537,18 @@ impl<P: AstPayload> AssignP<P> {
 
     pub(crate) fn visit_expr_mut<'a>(&'a mut self, mut f: impl FnMut(&'a mut AstExprP<P>)) {
         fn recurse<'a, P: AstPayload>(
-            x: &'a mut AssignP<P>,
+            x: &'a mut AssignTargetP<P>,
             f: &mut impl FnMut(&'a mut AstExprP<P>),
         ) {
             match x {
-                AssignP::Tuple(ref mut xs) => xs.iter_mut().for_each(|x| recurse(&mut *x, f)),
-                AssignP::Dot(a, _) => f(a),
-                AssignP::Index(a_b) => {
+                AssignTargetP::Tuple(ref mut xs) => xs.iter_mut().for_each(|x| recurse(&mut *x, f)),
+                AssignTargetP::Dot(a, _) => f(a),
+                AssignTargetP::Index(a_b) => {
                     let (a, b) = &mut **a_b;
                     f(a);
                     f(b);
                 }
-                AssignP::Identifier(..) => {}
+                AssignTargetP::Identifier(..) => {}
             }
         }
         recurse(self, &mut f)
@@ -527,12 +559,12 @@ impl<P: AstPayload> AssignP<P> {
     /// Note that assignments like `x[i] = n` don't bind any names.
     pub(crate) fn visit_lvalue<'a>(&'a self, mut f: impl FnMut(&'a AstAssignIdentP<P>)) {
         fn recurse<'a, P: AstPayload>(
-            x: &'a AssignP<P>,
+            x: &'a AssignTargetP<P>,
             f: &mut impl FnMut(&'a AstAssignIdentP<P>),
         ) {
             match x {
-                AssignP::Identifier(x) => f(x),
-                AssignP::Tuple(xs) => xs.iter().for_each(|x| recurse(x, f)),
+                AssignTargetP::Identifier(x) => f(x),
+                AssignTargetP::Tuple(xs) => xs.iter().for_each(|x| recurse(x, f)),
                 _ => {}
             }
         }
@@ -544,12 +576,12 @@ impl<P: AstPayload> AssignP<P> {
         mut f: impl FnMut(&'a mut AstAssignIdentP<P>),
     ) {
         fn recurse<'a, P: AstPayload>(
-            x: &'a mut AssignP<P>,
+            x: &'a mut AssignTargetP<P>,
             f: &mut impl FnMut(&'a mut AstAssignIdentP<P>),
         ) {
             match x {
-                AssignP::Identifier(x) => f(x),
-                AssignP::Tuple(xs) => xs.iter_mut().for_each(|x| recurse(x, f)),
+                AssignTargetP::Identifier(x) => f(x),
+                AssignTargetP::Tuple(xs) => xs.iter_mut().for_each(|x| recurse(x, f)),
                 _ => {}
             }
         }

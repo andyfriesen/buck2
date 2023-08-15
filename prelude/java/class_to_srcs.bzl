@@ -11,7 +11,7 @@ load(
     "JavaToolchainInfo",  # @unused Used as a type
 )
 
-def _class_to_src_map_args(mapping: ["artifact", None]):
+def _class_to_src_map_args(mapping: [Artifact, None]):
     if mapping != None:
         return cmd_args(mapping)
     return cmd_args()
@@ -30,7 +30,7 @@ JavaClassToSourceMapInfo = provider(
 
 def create_class_to_source_map_info(
         ctx: AnalysisContext,
-        mapping: ["artifact", None] = None,
+        mapping: [Artifact, None] = None,
         deps = [Dependency]) -> JavaClassToSourceMapInfo.type:
     return JavaClassToSourceMapInfo(
         tset = ctx.actions.tset(
@@ -41,11 +41,11 @@ def create_class_to_source_map_info(
     )
 
 def create_class_to_source_map_from_jar(
-        actions: "actions",
+        actions: AnalysisActions,
         name: str,
         java_toolchain: JavaToolchainInfo.type,
-        jar: "artifact",
-        srcs: list["artifact"]) -> "artifact":
+        jar: Artifact,
+        srcs: list[Artifact]) -> Artifact:
     output = actions.declare_output(name)
     cmd = cmd_args(java_toolchain.gen_class_to_source_map[RunInfo])
     cmd.add("-o", output.as_output())
@@ -56,12 +56,12 @@ def create_class_to_source_map_from_jar(
     return output
 
 def merge_class_to_source_map_from_jar(
-        actions: "actions",
+        actions: AnalysisActions,
         name: str,
         java_test_toolchain: JavaTestToolchainInfo.type,
-        mapping: ["artifact", None] = None,
+        mapping: [Artifact, None] = None,
         relative_to: ["cell_root", None] = None,
-        deps = [JavaClassToSourceMapInfo.type]) -> "artifact":
+        deps = [JavaClassToSourceMapInfo.type]) -> Artifact:
     output = actions.declare_output(name)
     cmd = cmd_args(java_test_toolchain.merge_class_to_source_maps[RunInfo])
     cmd.add(cmd_args(output.as_output(), format = "--output={}"))

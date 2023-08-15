@@ -31,6 +31,11 @@ use syn::ReturnType;
 use syn::TraitItem;
 use syn::TraitItemFn;
 
+/// Constant/field name for a flag whether a member is overridden.
+pub(crate) fn vtable_has_field_name(name: &syn::Ident) -> syn::Ident {
+    quote::format_ident!("HAS_{}", name)
+}
+
 struct Gen {
     starlark_value: ItemTrait,
 }
@@ -231,38 +236,82 @@ impl Gen {
         Ok((item_attrs.unwrap_or_default(), new_attrs))
     }
 
-    fn gen_starlark_value_vtable(&self) -> syn::Result<TokenStream> {
-        let mut fields = Vec::new();
-        let mut inits = Vec::new();
-        let mut init_black_holes = Vec::new();
-        let mut starlark_value = self.starlark_value.clone();
-        for item in &mut starlark_value.items {
-            let m = match item {
-                TraitItem::Fn(m) => m,
-                _ => continue,
-            };
-
-            let (item_attrs, new_attrs) = self.process_item_attrs(&m.attrs)?;
-            m.attrs = new_attrs;
-            if item_attrs.skip {
-                continue;
-            }
-
-            let VTableEntry {
-                field,
-                init,
-                init_for_black_hole,
-            } = self.vtable_entry(m)?;
-            fields.push(field);
-            inits.push(init);
-            init_black_holes.push(init_for_black_hole);
+    fn process_starlark_value_vtable_fn(
+        &self,
+        m: &mut syn::TraitItemFn,
+    ) -> syn::Result<Option<VTableEntry>> {
+        let (item_attrs, new_attrs) = self.process_item_attrs(&m.attrs)?;
+        m.attrs = new_attrs;
+        if item_attrs.skip {
+            return Ok(None);
         }
+
+        Ok(Some(self.vtable_entry(m)?))
+    }
+
+    fn process_starlark_value_vtable_type(&self, item_type: &mut syn::TraitItemType) {
+        if item_type.ident == "Canonical" {
+            // This won't be needed once associated type defaults are stabilized.
+            // https://github.com/rust-lang/rust/issues/29661
+            item_type.default = None;
+        }
+    }
+
+    fn gen_starlark_value_vtable(&self) -> syn::Result<TokenStream> {
+        let mut fields: Vec<syn::Field> = Vec::new();
+        let mut inits: Vec<syn::FieldValue> = Vec::new();
+        let mut init_black_holes: Vec<syn::FieldValue> = Vec::new();
+        let mut starlark_value = self.starlark_value.clone();
+        let mut extra_items: Vec<syn::TraitItem> = Vec::new();
+        for item in &mut starlark_value.items {
+            match item {
+                TraitItem::Fn(m) => {
+                    if let Some(entry) = self.process_starlark_value_vtable_fn(m)? {
+                        let VTableEntry {
+                            field,
+                            init,
+                            init_for_black_hole,
+                        } = entry;
+                        fields.push(field);
+                        inits.push(init);
+                        init_black_holes.push(init_for_black_hole);
+                    }
+
+                    // Generate `HAS_foo: bool` vtable entry for each `foo` function.
+                    // It is initialized with `true` if an implementation overrides the member.
+                    // This is used for example, to check if trait has `invoke` member,
+                    // and if it has, type is considered implementing `typing.Callable`.
+                    let has_name = vtable_has_field_name(&m.sig.ident);
+                    extra_items.push(syn::parse_quote_spanned! { m.sig.span() =>
+                        #[doc(hidden)]
+                        const #has_name: bool = false;
+                    });
+
+                    fields.push(Self::parse_named_field(quote_spanned! { m.sig.span()=>
+                        pub(crate) #has_name: bool
+                    })?);
+                    inits.push(syn::parse_quote_spanned! { m.sig.span() =>
+                        #has_name: T::#has_name
+                    });
+                    init_black_holes.push(syn::parse_quote_spanned! { m.sig.span() =>
+                        #has_name: false
+                    });
+                }
+                TraitItem::Type(ty) => self.process_starlark_value_vtable_type(ty),
+                TraitItem::Const(_) => {}
+                item => {
+                    return Err(syn::Error::new_spanned(item, "unexpected item"));
+                }
+            }
+        }
+        starlark_value.items.extend(extra_items);
 
         Ok(quote_spanned! {
             self.starlark_value.span() =>
 
             #starlark_value
 
+            #[allow(non_upper_case_globals, non_snake_case, dead_code)]
             pub(crate) struct StarlarkValueVTable {
                 #(#fields),*
             }

@@ -23,7 +23,7 @@ use buck2_common::client_utils::get_channel_tcp;
 use buck2_common::client_utils::get_channel_uds;
 use buck2_common::daemon_dir::DaemonDir;
 use buck2_common::invocation_paths::InvocationPaths;
-use buck2_common::legacy_configs::cells::DaemonStartupConfig;
+use buck2_common::legacy_configs::init::DaemonStartupConfig;
 use buck2_core::env_helper::EnvHelper;
 use buck2_util::process::async_background_command;
 use buck2_util::truncate::truncate;
@@ -286,7 +286,7 @@ impl<'a> BuckdLifecycle<'a> {
         daemon_env_vars: &[(&OsStr, &OsStr)],
         daemon_startup_config: &DaemonStartupConfig,
     ) -> anyhow::Result<()> {
-        let daemon_startup_config = daemon_startup_config.serialize();
+        let daemon_startup_config = daemon_startup_config.serialize()?;
         args.extend(["daemon", "--dont-daemonize"]);
         spawn_background_process_on_windows(
             self.paths.project_root().root(),
@@ -317,7 +317,7 @@ impl<'a> BuckdLifecycle<'a> {
             .args(args);
 
         cmd.arg("daemon");
-        cmd.arg(daemon_startup_config.serialize());
+        cmd.arg(daemon_startup_config.serialize()?);
 
         static DAEMON_LOG_TO_FILE: EnvHelper<u8> = EnvHelper::<u8>::new("BUCK_DAEMON_LOG_TO_FILE");
         if DAEMON_LOG_TO_FILE.get_copied()? == Some(1) {

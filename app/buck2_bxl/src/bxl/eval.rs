@@ -37,7 +37,7 @@ use buck2_interpreter::dice::starlark_provider::with_starlark_eval_provider;
 use buck2_interpreter::factory::StarlarkEvaluatorProvider;
 use buck2_interpreter::file_loader::LoadedModule;
 use buck2_interpreter::load_module::InterpreterCalculation;
-use buck2_interpreter::path::StarlarkModulePath;
+use buck2_interpreter::paths::module::StarlarkModulePath;
 use buck2_interpreter::print_handler::EventDispatcherPrintHandler;
 use buck2_interpreter::starlark_profiler::StarlarkProfileDataAndStats;
 use buck2_interpreter::starlark_profiler::StarlarkProfileModeOrInstrumentation;
@@ -155,7 +155,7 @@ pub(crate) async fn eval(
                         ctx,
                         &mut profiler,
                         format!("bxl:{}", key),
-                        move |provider| {
+                        move |provider, ctx| {
                             let env = Module::new();
 
                             let resolved_args = env.heap().alloc(AllocStruct(
@@ -292,13 +292,15 @@ pub(crate) async fn eval(
 // We use a file as our output/error stream cache. The file is associated with the `BxlDynamicKey` (created from `BxlKey`),
 // which is super important, as it HAS to be the SAME as the DiceKey so that DICE is keeping the output file
 // cache up to date. `BxlDynamicKey` requires an execution platform. We set the execution platform to be unspecified here
-// because BXL functions do not have execution platform resolutions
+// because BXL functions do not have execution platform resolutions. exec_deps, toolchains, target_platform, and exec_compatible_with
+// are empty here for the same reason.
 pub(crate) fn mk_stream_cache(stream_type: &str, key: &BxlKey) -> BuckOutPath {
     BuckOutPath::new(
-        BaseDeferredKey::BxlLabel(
-            key.dupe()
-                .into_base_deferred_key_dyn_impl(ExecutionPlatformResolution::unspecified()),
-        ),
+        BaseDeferredKey::BxlLabel(key.dupe().into_base_deferred_key_dyn_impl(
+            ExecutionPlatformResolution::unspecified(),
+            Vec::new(),
+            Vec::new(),
+        )),
         ForwardRelativePathBuf::unchecked_new(format!(
             "__bxl_internal__/{}stream_cache",
             stream_type
@@ -321,20 +323,19 @@ fn eval_bxl<'a>(
     result
 }
 
+#[derive(Debug, Error)]
+#[error("Expected {0} to be a bxl function, was a {1}")]
+struct NotABxlFunction(String, &'static str);
+
 pub(crate) fn get_bxl_callable<'a>(
     spec: &BxlFunctionLabel,
     bxl_module: &'a LoadedModule,
 ) -> anyhow::Result<OwnedFrozenValueTyped<FrozenBxlFunction>> {
     let callable = bxl_module.env().get_any_visibility(&spec.name)?.0;
 
-    Ok(callable
+    callable
         .downcast::<FrozenBxlFunction>()
-        .unwrap_or_else(|e| {
-            panic!(
-                "A bxl function should be a BxlFunction. It was a {}",
-                e.value().get_type(),
-            )
-        }))
+        .map_err(|e| NotABxlFunction(spec.name.clone(), e.value().get_type()).into())
 }
 
 pub(crate) struct CliResolutionCtx<'a> {

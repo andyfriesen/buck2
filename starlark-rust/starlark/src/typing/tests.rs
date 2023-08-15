@@ -40,7 +40,7 @@ use crate::typing::OracleStandard;
 use crate::typing::Ty;
 use crate::typing::TypingOracle;
 use crate::values::none::NoneType;
-use crate::values::StarlarkIter;
+use crate::values::typing::StarlarkIter;
 use crate::values::Value;
 use crate::values::ValueOfUnchecked;
 
@@ -101,7 +101,7 @@ fn test_oracle() {
 
 #[derive(Default)]
 struct TypeCheck {
-    expect_interface: Vec<String>,
+    expect_types: Vec<String>,
     loads: HashMap<String, Interface>,
 }
 
@@ -121,7 +121,7 @@ impl TypeCheck {
     }
 
     fn ty(mut self, name: &str) -> Self {
-        self.expect_interface.push(name.to_owned());
+        self.expect_types.push(name.to_owned());
         self
     }
 
@@ -134,7 +134,7 @@ impl TypeCheck {
         let globals = GlobalsBuilder::extended()
             .with(register_typecheck_globals)
             .build();
-        let (errors, _, interface, approximations) =
+        let (errors, typemap, interface, approximations) =
             AstModule::parse("filename", code.to_owned(), &Dialect::Extended)
                 .unwrap()
                 .typecheck(&mk_oracle(), &globals, &self.loads);
@@ -164,12 +164,16 @@ impl TypeCheck {
             }
         }
 
-        if !self.expect_interface.is_empty() {
+        if !self.expect_types.is_empty() {
             writeln!(output).unwrap();
-            writeln!(output, "Interfaces:").unwrap();
-            for k in &self.expect_interface {
-                let intf = interface.get(k).expect("no interface for key");
-                writeln!(output, "{}: {}", k, intf).unwrap();
+            writeln!(output, "Types:").unwrap();
+            for k in &self.expect_types {
+                let types = typemap.find_bindings_by_name(k);
+                match types.as_slice() {
+                    [ty] => writeln!(output, "{}: {}", k, ty).unwrap(),
+                    [] => panic!("Type not found for {}", k),
+                    [_, _, ..] => panic!("Multiple types found for {}", k),
+                }
             }
         }
 
@@ -201,7 +205,7 @@ fn test_load() {
     let interface = TypeCheck::new().check(
         "load_0",
         r#"
-def foo(x: [bool.type]) -> str.type:
+def foo(x: list[bool]) -> str:
     return "test"
    "#,
     );
@@ -231,6 +235,17 @@ fn test_type_kwargs() {
 def foo(**kwargs):
     pass
 foo(**{1: "x"})
+"#,
+    );
+}
+
+#[test]
+fn test_types_of_args_kwargs() {
+    TypeCheck::new().ty("args").ty("kwargs").check(
+        "types_of_args_kwargs",
+        r#"
+def foo(*args: str, **kwargs: int):
+    pass
 "#,
     );
 }
@@ -291,7 +306,7 @@ fn test_call_not_callable() {
     TypeCheck::new().check(
         "call_not_callable",
         r#"
-def foo(x: [""]):
+def foo(x: list):
     x()
 "#,
     );
@@ -413,6 +428,16 @@ x.append(x)
 }
 
 #[test]
+fn test_list_function() {
+    TypeCheck::new().ty("x").check(
+        "list_function",
+        r#"
+x = list([1, 2])
+"#,
+    );
+}
+
+#[test]
 fn test_accepts_iterable() {
     TypeCheck::new().check(
         "accepts_iterable",
@@ -445,8 +470,8 @@ fn test_new_list_dict_syntax() {
     TypeCheck::new().ty("x").check(
         "new_list_dict_syntax",
         r#"
-def new_list_dict_syntax(x: dict[str, int]) -> list[str]:
-    return list(x.keys())
+def new_list_dict_syntax(d: dict[str, int]) -> list[str]:
+    return list(d.keys())
 
 # Check type is properly parsed from the function return type.
 x = new_list_dict_syntax({"a": 1, "b": 2})

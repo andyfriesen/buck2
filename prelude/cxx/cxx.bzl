@@ -11,6 +11,7 @@ load(
 )
 load("@prelude//apple:resource_groups.bzl", "create_resource_graph")
 load("@prelude//cxx:cxx_sources.bzl", "get_srcs_with_flags")
+load("@prelude//linking:execution_preference.bzl", "LinkExecutionPreference")
 load(
     "@prelude//linking:link_groups.bzl",
     "merge_link_group_lib_info",
@@ -100,6 +101,10 @@ load(
     "get_link_group_info",
 )
 load(
+    ":link_types.bzl",
+    "link_options",
+)
+load(
     ":linker.bzl",
     "PDB_SUB_TARGET",
     "get_link_whole_args",
@@ -128,7 +133,7 @@ load(
 def _get_shared_link_style_sub_targets_and_providers(
         link_style: LinkStyle.type,
         _ctx: AnalysisContext,
-        output: [CxxLibraryOutput.type, None]) -> (dict[str, list["provider"]], list["provider"]):
+        output: [CxxLibraryOutput.type, None]) -> (dict[str, list[Provider]], list[Provider]):
     if link_style != LinkStyle("shared") or output == None:
         return ({}, [])
     sub_targets = {}
@@ -141,7 +146,7 @@ def _get_shared_link_style_sub_targets_and_providers(
         sub_targets["linker-map"] = [DefaultInfo(default_output = output.linker_map.map, other_outputs = [output.linker_map.binary])]
     return (sub_targets, providers)
 
-def cxx_library_impl(ctx: AnalysisContext) -> list["provider"]:
+def cxx_library_impl(ctx: AnalysisContext) -> list[Provider]:
     if ctx.attrs.can_be_asset and ctx.attrs.used_by_wrap_script:
         fail("Cannot use `can_be_asset` and `used_by_wrap_script` in the same rule")
 
@@ -199,7 +204,7 @@ def get_auto_link_group_specs(ctx: AnalysisContext, link_group_info: [LinkGroupI
         return None
     return create_shared_lib_link_group_specs(ctx, link_group_info)
 
-def cxx_binary_impl(ctx: AnalysisContext) -> list["provider"]:
+def cxx_binary_impl(ctx: AnalysisContext) -> list[Provider]:
     link_group_info = get_link_group_info(ctx, filter_and_map_idx(LinkableGraph, cxx_attr_deps(ctx)))
     params = CxxRuleConstructorParams(
         rule_type = "cxx_binary",
@@ -208,6 +213,7 @@ def cxx_binary_impl(ctx: AnalysisContext) -> list["provider"]:
         link_group_info = link_group_info,
         auto_link_group_specs = get_auto_link_group_specs(ctx, link_group_info),
         prefer_stripped_objects = ctx.attrs.prefer_stripped_objects,
+        exe_allow_cache_upload = ctx.attrs.allow_cache_upload,
     )
     output = cxx_executable(ctx, params)
 
@@ -224,8 +230,8 @@ def cxx_binary_impl(ctx: AnalysisContext) -> list["provider"]:
 
 def _prebuilt_item(
         ctx: AnalysisContext,
-        item: ["", None],
-        platform_items: [list[(str, "_a")], None]) -> ["_a", None]:
+        item: [typing.Any, None],
+        platform_items: [list[(str, typing.Any)], None]) -> [typing.Any, None]:
     """
     Parse the given item that can be specified by regular and platform-specific
     parameters.
@@ -259,7 +265,7 @@ def _prebuilt_linkage(ctx: AnalysisContext) -> Linkage.type:
         return Linkage("shared")
     return Linkage("any")
 
-def prebuilt_cxx_library_impl(ctx: AnalysisContext) -> list["provider"]:
+def prebuilt_cxx_library_impl(ctx: AnalysisContext) -> list[Provider]:
     # Versioned params should be intercepted and converted away via the stub.
     expect(not ctx.attrs.versioned_exported_lang_platform_preprocessor_flags)
     expect(not ctx.attrs.versioned_exported_lang_preprocessor_flags)
@@ -382,12 +388,15 @@ def prebuilt_cxx_library_impl(ctx: AnalysisContext) -> list["provider"]:
                             ctx = ctx,
                             output = soname,
                             name = soname,
-                            links = [
-                                LinkArgs(flags = shlink_args),
-                                # TODO(T110378118): As per v1, we always link against "shared"
-                                # dependencies when building a shaerd library.
-                                get_link_args(inherited_exported_link, LinkStyle("shared")),
-                            ],
+                            opts = link_options(
+                                links = [
+                                    LinkArgs(flags = shlink_args),
+                                    # TODO(T110378118): As per v1, we always link against "shared"
+                                    # dependencies when building a shaerd library.
+                                    get_link_args(inherited_exported_link, LinkStyle("shared")),
+                                ],
+                                link_execution_preference = LinkExecutionPreference("any"),
+                            ),
                         )
                         shared_lib = link_result.linked_object
 
@@ -562,7 +571,7 @@ def prebuilt_cxx_library_impl(ctx: AnalysisContext) -> list["provider"]:
 
     return providers
 
-def cxx_precompiled_header_impl(ctx: AnalysisContext) -> list["provider"]:
+def cxx_precompiled_header_impl(ctx: AnalysisContext) -> list[Provider]:
     inherited_pp_infos = cxx_inherited_preprocessor_infos(ctx.attrs.deps)
     inherited_link = cxx_inherited_link_info(ctx, ctx.attrs.deps)
     return [
@@ -572,7 +581,7 @@ def cxx_precompiled_header_impl(ctx: AnalysisContext) -> list["provider"]:
         CPrecompiledHeaderInfo(header = ctx.attrs.src),
     ]
 
-def cxx_test_impl(ctx: AnalysisContext) -> list["provider"]:
+def cxx_test_impl(ctx: AnalysisContext) -> list[Provider]:
     link_group_info = get_link_group_info(ctx, filter_and_map_idx(LinkableGraph, cxx_attr_deps(ctx)))
 
     # TODO(T110378115): have the runinfo contain the correct test running args

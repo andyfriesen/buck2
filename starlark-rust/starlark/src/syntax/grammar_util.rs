@@ -25,12 +25,13 @@ use crate::codemap::Span;
 use crate::codemap::Spanned;
 use crate::eval::compiler::EvalException;
 use crate::slice_vec_ext::VecExt;
-use crate::syntax::ast::Assign;
 use crate::syntax::ast::AssignIdentP;
 use crate::syntax::ast::AssignOp;
 use crate::syntax::ast::AssignP;
-use crate::syntax::ast::AstAssign;
+use crate::syntax::ast::AssignTarget;
+use crate::syntax::ast::AssignTargetP;
 use crate::syntax::ast::AstAssignIdent;
+use crate::syntax::ast::AstAssignTarget;
 use crate::syntax::ast::AstExpr;
 use crate::syntax::ast::AstFString;
 use crate::syntax::ast::AstParameter;
@@ -74,16 +75,19 @@ pub(crate) fn statements(mut xs: Vec<AstStmt>, begin: usize, end: usize) -> AstS
     }
 }
 
-pub(crate) fn check_assign(codemap: &CodeMap, x: AstExpr) -> Result<AstAssign, EvalException> {
+pub(crate) fn check_assign(
+    codemap: &CodeMap,
+    x: AstExpr,
+) -> Result<AstAssignTarget, EvalException> {
     Ok(Spanned {
         span: x.span,
         node: match x.node {
             Expr::Tuple(xs) | Expr::List(xs) => {
-                Assign::Tuple(xs.into_try_map(|x| check_assign(codemap, x))?)
+                AssignTarget::Tuple(xs.into_try_map(|x| check_assign(codemap, x))?)
             }
-            Expr::Dot(a, b) => Assign::Dot(a, b),
-            Expr::Index(a_b) => Assign::Index(a_b),
-            Expr::Identifier(x) => Assign::Identifier(x.into_map(|s| AssignIdentP(s.0, ()))),
+            Expr::Dot(a, b) => AssignTarget::Dot(a, b),
+            Expr::Index(a_b) => AssignTarget::Index(a_b),
+            Expr::Identifier(x) => AssignTarget::Identifier(x.map(|s| AssignIdentP(s.0, ()))),
             _ => {
                 return Err(EvalException::new(
                     GrammarUtilError::InvalidLhs.into(),
@@ -119,7 +123,7 @@ pub(crate) fn check_assignment(
     if let Some(ty) = &ty {
         let err = if op.is_some() {
             Some(GrammarUtilError::TypeAnnotationOnAssignOp)
-        } else if matches!(lhs.node, AssignP::Tuple(_)) {
+        } else if matches!(lhs.node, AssignTargetP::Tuple(_)) {
             Some(GrammarUtilError::TypeAnnotationOnTupleAssign)
         } else {
             None
@@ -129,7 +133,11 @@ pub(crate) fn check_assignment(
         }
     }
     Ok(match op {
-        None => Stmt::Assign(lhs, Box::new((ty.map(|x| *x), rhs))),
+        None => Stmt::Assign(AssignP {
+            lhs,
+            ty: ty.map(|ty| *ty),
+            rhs,
+        }),
         Some(op) => Stmt::AssignModify(lhs, op, Box::new(rhs)),
     })
 }
@@ -231,7 +239,7 @@ pub(crate) fn check_def(
     parser_state: &mut ParserState,
 ) -> Stmt {
     check_parameters(&params, parser_state);
-    let name = name.into_map(|s| AssignIdentP(s, ()));
+    let name = name.map(|s| AssignIdentP(s, ()));
     Stmt::Def(DefP {
         name,
         params,

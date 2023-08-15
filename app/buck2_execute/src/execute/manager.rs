@@ -42,6 +42,7 @@ pub struct CommandExecutionManager {
     pub claim_manager: Box<dyn ClaimManager>,
     pub events: EventDispatcher,
     pub liveliness_observer: Arc<dyn LivelinessObserver>,
+    pub intend_to_fallback_on_failure: bool,
 }
 
 impl CommandExecutionManager {
@@ -54,6 +55,7 @@ impl CommandExecutionManager {
             claim_manager,
             events,
             liveliness_observer,
+            intend_to_fallback_on_failure: false,
         }
     }
 
@@ -81,6 +83,14 @@ impl CommandExecutionManager {
             CommandExecutionMetadata::default(),
         )
     }
+
+    pub fn with_intend_to_fallback_on_failure(
+        mut self,
+        intend_to_fallback_on_failure: bool,
+    ) -> Self {
+        self.intend_to_fallback_on_failure = intend_to_fallback_on_failure;
+        self
+    }
 }
 
 impl CommandExecutionManagerLike for CommandExecutionManager {
@@ -103,6 +113,8 @@ impl CommandExecutionManagerLike for CommandExecutionManager {
             },
             rejected_execution: None,
             did_cache_upload: false,
+            did_dep_file_cache_upload: false,
+            dep_file_key: None,
             eligible_for_full_hybrid: false,
         }
     }
@@ -165,6 +177,8 @@ impl CommandExecutionManagerLike for CommandExecutionManagerWithClaim {
             },
             rejected_execution: None,
             did_cache_upload: false,
+            did_dep_file_cache_upload: false,
+            dep_file_key: None,
             eligible_for_full_hybrid: false,
         }
     }

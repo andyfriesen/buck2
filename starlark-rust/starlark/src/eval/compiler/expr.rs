@@ -65,6 +65,7 @@ use crate::values::list::ListRef;
 use crate::values::string::interpolation::parse_percent_s_one;
 use crate::values::types::bool::StarlarkBool;
 use crate::values::types::dict::Dict;
+use crate::values::types::ellipsis::Ellipsis;
 use crate::values::types::float::StarlarkFloat;
 use crate::values::types::inline_int::InlineInt;
 use crate::values::types::list::value::FrozenListData;
@@ -311,6 +312,14 @@ impl ExprCompiled {
     pub(crate) fn is_fn_type(&self) -> bool {
         match self.as_value() {
             Some(value) => value == Constants::get().fn_type,
+            None => false,
+        }
+    }
+
+    /// Expression is builtin `isinstance` function.
+    pub(crate) fn is_fn_isinstance(&self) -> bool {
+        match self.as_value() {
+            Some(value) => value == Constants::get().fn_isinstance,
             None => false,
         }
     }
@@ -1019,6 +1028,7 @@ impl AstLiteral {
             AstLiteral::Int(i) => heap.alloc(i.node.0.clone()),
             AstLiteral::Float(f) => heap.alloc(f.node),
             AstLiteral::String(x) => heap.alloc(x.node.as_str()),
+            AstLiteral::Ellipsis => heap.alloc(Ellipsis),
         }
     }
 }

@@ -5,6 +5,11 @@
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
 # of this source tree.
 
+load(
+    "@prelude//:artifact_tset.bzl",
+    "make_artifact_tset",
+    "project_artifacts",
+)
 load("@prelude//:paths.bzl", "paths")
 load(
     "@prelude//cxx:cxx_bolt.bzl",
@@ -27,32 +32,34 @@ load(
     "ArchiveLinkable",  # @unused Used as a type
     "FrameworksLinkable",  # @unused Used as a type
     "LinkArgs",
+    "LinkInfo",
     "LinkableType",
     "LinkedObject",
     "ObjectsLinkable",  # @unused Used as a type
     "SharedLibLinkable",  # @unused Used as a type
     "append_linkable_args",
     "map_to_link_infos",
+    "unpack_external_debug_info",
 )
 load("@prelude//utils:utils.bzl", "is_all")
 
 _BitcodeLinkData = record(
     name = str,
-    initial_object = "artifact",
-    bc_file = "artifact",
-    plan = "artifact",
-    opt_object = "artifact",
+    initial_object = Artifact,
+    bc_file = Artifact,
+    plan = Artifact,
+    opt_object = Artifact,
 )
 
 _ArchiveLinkData = record(
     name = str,
-    manifest = "artifact",
+    manifest = Artifact,
     # A file containing paths to artifacts that are known to reside in opt_objects_dir.
-    opt_manifest = "artifact",
-    objects_dir = "artifact",
-    opt_objects_dir = "artifact",
-    indexes_dir = "artifact",
-    plan = "artifact",
+    opt_manifest = Artifact,
+    objects_dir = Artifact,
+    opt_objects_dir = Artifact,
+    indexes_dir = Artifact,
+    plan = Artifact,
     link_whole = bool,
     prepend = bool,
 )
@@ -75,10 +82,10 @@ _PrePostFlags = record(
 
 def cxx_dist_link(
         ctx: AnalysisContext,
-        links: list["LinkArgs"],
+        links: list[LinkArgs],
         # The destination for the link output.
-        output: "artifact",
-        linker_map: ["artifact", None] = None,
+        output: Artifact,
+        linker_map: [Artifact, None] = None,
         # A category suffix that will be added to the category of the link action that is generated.
         category_suffix: [str, None] = None,
         # An identifier that will uniquely name this link action in the context of a category. Useful for
@@ -116,7 +123,7 @@ def cxx_dist_link(
 
     recorded_outputs = {}
 
-    def name_for_obj(link_name: str, object_artifact: "artifact") -> str:
+    def name_for_obj(link_name: str, object_artifact: Artifact) -> str:
         """ Creates a unique name/path we can use for a particular object file input """
         prefix = "{}/{}".format(link_name, object_artifact.short_path)
 
@@ -131,7 +138,7 @@ def cxx_dist_link(
 
     names = {}
 
-    def name_for_link(info: "LinkInfo") -> str:
+    def name_for_link(info: LinkInfo.type) -> str:
         """ Creates a unique name for a LinkInfo that we are consuming """
         name = info.name or "unknown"
         if name not in names:
@@ -140,15 +147,6 @@ def cxx_dist_link(
             names[name] += 1
             name += "-{}".format(names[name])
         return make_id(name)
-
-    links = [
-        LinkArgs(
-            tset = link.tset,
-            flags = link.flags,
-            infos = link.infos,
-        )
-        for link in links
-    ]
 
     link_infos = map_to_link_infos(links)
 
@@ -286,7 +284,7 @@ def cxx_dist_link(
     index_argsfile_out = ctx.actions.declare_output(output.basename + ".thinlto.index.argsfile")
     final_link_index = ctx.actions.declare_output(output.basename + ".final_link_index")
 
-    def dynamic_plan(link_plan: "artifact", index_argsfile_out: "artifact", final_link_index: "artifact"):
+    def dynamic_plan(link_plan: Artifact, index_argsfile_out: Artifact, final_link_index: Artifact):
         def plan(ctx, artifacts, outputs):
             # buildifier: disable=uninitialized
             def add_pre_flags(idx: int):
@@ -405,7 +403,7 @@ def cxx_dist_link(
     link_plan_out = ctx.actions.declare_output(output.basename + ".link-plan.json")
     dynamic_plan(link_plan = link_plan_out, index_argsfile_out = index_argsfile_out, final_link_index = final_link_index)
 
-    def prepare_opt_flags(link_infos: list["LinkInfo"]) -> cmd_args:
+    def prepare_opt_flags(link_infos: list[LinkInfo.type]) -> cmd_args:
         opt_args = cmd_args()
         opt_args.add(cxx_link_cmd(ctx))
 
@@ -422,7 +420,7 @@ def cxx_dist_link(
     # opt actions, but an action needs to re-run whenever the analysis that
     # produced it re-runs. And so, with a single dynamic_output, we'd need to
     # re-run all actions when any of the plans changed.
-    def dynamic_optimize(name: str, initial_object: "artifact", bc_file: "artifact", plan: "artifact", opt_object: "artifact"):
+    def dynamic_optimize(name: str, initial_object: Artifact, bc_file: Artifact, plan: Artifact, opt_object: Artifact):
         def optimize_object(ctx, artifacts, outputs):
             plan_json = artifacts[plan].read_json()
 
@@ -509,6 +507,7 @@ def cxx_dist_link(
 
                 opt_argsfile = ctx.actions.declare_output(opt_object.basename + ".opt.argsfile")
                 ctx.actions.write(opt_argsfile.as_output(), opt_common_flags, allow_args = True)
+                opt_cmd.hidden(opt_common_flags)
                 opt_cmd.add("--args", opt_argsfile)
 
                 opt_cmd.add("--")
@@ -607,16 +606,26 @@ def cxx_dist_link(
         f = thin_lto_final_link,
     )
 
+    external_debug_info = make_artifact_tset(
+        actions = ctx.actions,
+        children = [
+            unpack_external_debug_info(ctx.actions, link_args)
+            for link_args in links
+        ],
+    )
+
     final_output = output if not (executable_link and cxx_use_bolt(ctx)) else bolt(ctx, output, identifier)
     dwp_output = ctx.actions.declare_output(output.short_path.removesuffix("-wrapper") + ".dwp") if generate_dwp else None
 
     if generate_dwp:
+        materialized_external_debug_info = project_artifacts(ctx.actions, [external_debug_info])
+        referenced_objects = final_link_inputs + materialized_external_debug_info
         run_dwp_action(
             ctx = ctx,
             obj = final_output,
             identifier = identifier,
             category_suffix = category_suffix,
-            referenced_objects = final_link_inputs,
+            referenced_objects = referenced_objects,
             dwp_output = dwp_output,
             # distributed thinlto link actions are ran locally, run llvm-dwp locally as well to
             # ensure all dwo source files are available
@@ -627,6 +636,7 @@ def cxx_dist_link(
         output = final_output,
         prebolt_output = output,
         dwp = dwp_output,
+        external_debug_info = external_debug_info,
         linker_argsfile = linker_argsfile_out,
         index_argsfile = index_argsfile_out,
     )

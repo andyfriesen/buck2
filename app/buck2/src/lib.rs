@@ -45,6 +45,7 @@ use buck2_client::commands::test::TestCommand;
 use buck2_client_ctx::argv::Argv;
 use buck2_client_ctx::cleanup_ctx::AsyncCleanupContextGuard;
 use buck2_client_ctx::client_ctx::ClientCommandContext;
+use buck2_client_ctx::client_metadata::ClientMetadata;
 use buck2_client_ctx::exit_result::ExitResult;
 use buck2_client_ctx::immediate_config::ImmediateConfigContext;
 use buck2_client_ctx::streaming::BuckSubcommand;
@@ -117,6 +118,16 @@ struct BeforeSubcommandOptions {
         parse(try_from_str = Verbosity::try_from_cli)
     )]
     verbosity: Verbosity,
+
+    /// The oncall executing this command
+    #[clap(long, global = true)]
+    oncall: Option<String>,
+
+    /// Metadata key-value pairs to inject into Buck2's logging. Client metadata must be of the
+    /// form `key=value`, where `key` is a snake_case identifier, and will be sent to backend
+    /// datasets.
+    #[clap(long, global = true)]
+    client_metadata: Vec<ClientMetadata>,
 
     /// Do not launch a daemon process, run buck server in client process.
     ///
@@ -376,6 +387,8 @@ impl CommandKind {
             restarted_trace_id: process.restarted_trace_id.dupe(),
             argv,
             runtime: &runtime,
+            oncall: common_opts.oncall,
+            client_metadata: common_opts.client_metadata,
         };
 
         match self {

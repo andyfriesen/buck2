@@ -21,7 +21,7 @@ def _unimplemented_impl(name):
     # some features disabled.
     return partial(_unimplemented, name)
 
-def _mk_rule(rule_spec: "") -> "rule":
+def _mk_rule(rule_spec: typing.Any) -> "rule":
     name = rule_spec.name
     attributes = rule_spec.attrs
 
@@ -41,10 +41,15 @@ def _mk_rule(rule_spec: "") -> "rule":
     if is_open_source():
         fat_platform_compatible = True
 
+    attributes = dict(attributes)
     if not fat_platform_compatible:
         # copy so we don't try change the passed in object
-        attributes = dict(attributes)
         attributes["_cxx_toolchain_target_configuration"] = attrs.dep(default = "fbcode//buck2/platform/execution:fat_platform_incompatible")
+
+    # Add _apple_platforms to all rules so that we may query the target platform to use until we support configuration
+    # modifiers and can use them to set the configuration to use for operations.
+    # Map of string identifer to platform.
+    attributes["_apple_platforms"] = attrs.dict(key = attrs.string(), value = attrs.dep(), sorted = False, default = {})
 
     extra_args = {}
     cfg = transitions.get(name)
@@ -90,7 +95,7 @@ def _flatten_decls():
             decls[rule] = getattr(decl_set, rule)
     return decls
 
-def _update_rules(rules: dict[str, ""], extra_attributes: ""):
+def _update_rules(rules: dict[str, typing.Any], extra_attributes: typing.Any):
     for k in dir(extra_attributes):
         v = getattr(extra_attributes, k)
         if k in rules:

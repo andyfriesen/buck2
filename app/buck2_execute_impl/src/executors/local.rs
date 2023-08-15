@@ -73,7 +73,9 @@ use futures::future::select;
 use futures::future::FutureExt;
 use futures::stream::StreamExt;
 use gazebo::prelude::*;
+use host_sharing::host_sharing::HostSharingGuard;
 use host_sharing::HostSharingBroker;
+use host_sharing::HostSharingRequirements;
 use indexmap::IndexMap;
 use more_futures::cancellable_future::CancellationObserver;
 use more_futures::cancellation::CancellationContext;
@@ -261,13 +263,7 @@ impl LocalExecutor {
         // TODO: Release here.
         let manager = manager.claim().await;
 
-        let scratch_dir = request.custom_tmpdir().as_ref().map(|tmpdir| {
-            self.artifact_fs
-                .buck_out_path_resolver()
-                .resolve_scratch(tmpdir)
-        });
-
-        let scratch_dir = &scratch_dir; // So it doesn't move in the block below.
+        let scratch_dir = request.scratch_path();
 
         if let Err(e) = executor_stage_async(
             buck2_data::LocalStage {
@@ -583,6 +579,30 @@ impl LocalExecutor {
         Ok(mapped_outputs)
     }
 
+    async fn acquire_worker_permit(
+        &self,
+        request: &CommandExecutionRequest,
+    ) -> Option<HostSharingGuard> {
+        if let (Some(worker_spec), Some(worker_pool)) = (request.worker(), self.worker_pool.dupe())
+        {
+            if let Some(broker) = &worker_pool.get_worker_broker(worker_spec) {
+                Some(
+                    executor_stage_async(
+                        buck2_data::LocalStage {
+                            stage: Some(buck2_data::WorkerQueued {}.into()),
+                        },
+                        broker.acquire(&HostSharingRequirements::default()),
+                    )
+                    .await,
+                )
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
     async fn initialize_worker(
         &self,
         request: &CommandExecutionRequest,
@@ -705,6 +725,8 @@ impl PreparedCommandExecutor for LocalExecutor {
         )
         .await;
 
+        let _worker_permit = self.acquire_worker_permit(request).await;
+
         let _permit = executor_stage_async(
             buck2_data::LocalStage {
                 stage: Some(buck2_data::LocalQueued {}.into()),
@@ -785,6 +807,9 @@ pub async fn materialize_inputs(
                 CleanOutputPaths::clean(std::iter::once(path.as_ref()), artifact_fs.fs())?;
                 artifact_fs.fs().write_file(&path, &metadata.data, false)?;
             }
+            CommandExecutionInput::ScratchPath(..) => {
+                // TODO: Handle this later
+            }
         }
     }
 
@@ -844,6 +869,9 @@ async fn check_inputs(
                     }
                     CommandExecutionInput::ActionMetadata(..) => {
                         // Ignore those here.
+                    }
+                    CommandExecutionInput::ScratchPath(..) => {
+                        // Nothing to look at
                     }
                 }
             }

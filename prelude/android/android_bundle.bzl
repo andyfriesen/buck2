@@ -6,11 +6,11 @@
 # of this source tree.
 
 load("@prelude//android:android_binary.bzl", "get_binary_info")
-load("@prelude//android:android_providers.bzl", "AndroidAabInfo")
+load("@prelude//android:android_providers.bzl", "AndroidAabInfo", "AndroidBinaryNativeLibsInfo", "AndroidBinaryResourcesInfo", "DexFilesInfo")
 load("@prelude//android:android_toolchain.bzl", "AndroidToolchainInfo")
 load("@prelude//java/utils:java_utils.bzl", "get_path_separator")
 
-def android_bundle_impl(ctx: AnalysisContext) -> list["provider"]:
+def android_bundle_impl(ctx: AnalysisContext) -> list[Provider]:
     android_binary_info = get_binary_info(ctx, use_proto_format = True)
 
     output_bundle = build_bundle(
@@ -36,11 +36,11 @@ def android_bundle_impl(ctx: AnalysisContext) -> list["provider"]:
 
 def build_bundle(
         label: Label,
-        actions: "actions",
+        actions: AnalysisActions,
         android_toolchain: AndroidToolchainInfo.type,
-        dex_files_info: "DexFilesInfo",
-        native_library_info: "AndroidBinaryNativeLibsInfo",
-        resources_info: "AndroidBinaryResourcesInfo") -> "artifact":
+        dex_files_info: DexFilesInfo.type,
+        native_library_info: AndroidBinaryNativeLibsInfo.type,
+        resources_info: AndroidBinaryResourcesInfo.type) -> Artifact:
     output_bundle = actions.declare_output("{}.aab".format(label.name))
 
     bundle_builder_args = cmd_args([

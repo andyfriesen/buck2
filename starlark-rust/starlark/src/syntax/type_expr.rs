@@ -25,6 +25,7 @@ use crate::syntax::ast::AstLiteral;
 use crate::syntax::ast::AstPayload;
 use crate::syntax::ast::BinOp;
 use crate::syntax::ast::ExprP;
+use crate::values::typing::type_compiled::compiled::TypeCompiled;
 
 #[derive(Debug, thiserror::Error)]
 enum TypeExprUnpackError {
@@ -32,10 +33,12 @@ enum TypeExprUnpackError {
     InvalidType(&'static str),
     #[error("Empty list is not allowed in type expression")]
     EmptyListInType,
-    #[error("Only dict literal with single entry is allowed in type expression")]
-    DictNot1InType,
     #[error("Only dot expression of form `ident.ident` is allowed in type expression")]
     DotInType,
+    #[error(r#"`""` or `"_xxx"` is not allowed in type expression, use `typing.Any` instead"#)]
+    EmptyStrInType,
+    #[error(r#"`"{0}"` is not allowed in type expression, use `{1}` instead"#)]
+    StrBanReplace(&'static str, &'static str),
 }
 
 /// This type should be used instead of `TypeExprP`, but a lot of code needs to be updated.
@@ -51,11 +54,6 @@ pub(crate) enum TypeExprUnpackP<'a, P: AstPayload> {
         Box<Spanned<TypeExprUnpackP<'a, P>>>,
     ),
     Union(Vec<Spanned<TypeExprUnpackP<'a, P>>>),
-    ListOf(Box<Spanned<TypeExprUnpackP<'a, P>>>),
-    DictOf(
-        Box<Spanned<TypeExprUnpackP<'a, P>>>,
-        Box<Spanned<TypeExprUnpackP<'a, P>>>,
-    ),
     Tuple(Vec<Spanned<TypeExprUnpackP<'a, P>>>),
     Literal(Spanned<&'a str>),
 }
@@ -84,12 +82,12 @@ impl<'a, P: AstPayload> TypeExprUnpackP<'a, P> {
             }
             ExprP::Dot(object, field) => {
                 let mut current: &AstExprP<P> = object;
-                let mut rem: Vec<Spanned<_>> = vec![field.as_ref().into_map(|x| x.as_str())];
+                let mut rem: Vec<Spanned<_>> = vec![field.as_ref().map(|x| x.as_str())];
                 loop {
                     match &current.node {
                         ExprP::Dot(o, f) => {
                             current = o;
-                            rem.push(f.as_ref().into_map(|x| x.as_str()));
+                            rem.push(f.as_ref().map(|x| x.as_str()));
                         }
                         ExprP::Identifier(i) => {
                             rem.reverse();
@@ -146,12 +144,45 @@ impl<'a, P: AstPayload> TypeExprUnpackP<'a, P> {
                 node: TypeExprUnpackP::Path(ident, Vec::new()),
             }),
             ExprP::Lambda(..) => err("lambda"),
-            ExprP::Literal(AstLiteral::String(s)) => Ok(Spanned {
-                span,
-                node: TypeExprUnpackP::Literal(s.as_ref().into_map(|x| x.as_str())),
-            }),
+            ExprP::Literal(AstLiteral::String(s)) => {
+                if TypeCompiled::is_wildcard(s) {
+                    return Err(EvalException::new(
+                        TypeExprUnpackError::EmptyStrInType.into(),
+                        expr.span,
+                        codemap,
+                    ));
+                }
+                let ban_replace = [
+                    ("str", "str"),
+                    ("string", "str"),
+                    ("int", "int"),
+                    ("float", "float"),
+                    ("bool", "bool"),
+                    ("list", "list"),
+                    ("dict", "dict"),
+                    ("tuple", "tuple"),
+                    ("NoneType", "None"),
+                    ("None", "None"),
+                    // TODO(nga): ban `"function"` too.
+                    // ("function", "typing.Callable"),
+                ];
+                for (ban, replace) in ban_replace {
+                    if s.as_str() == ban {
+                        return Err(EvalException::new(
+                            TypeExprUnpackError::StrBanReplace(ban, replace).into(),
+                            expr.span,
+                            codemap,
+                        ));
+                    }
+                }
+                Ok(Spanned {
+                    span,
+                    node: TypeExprUnpackP::Literal(s.as_ref().map(|x| x.as_str())),
+                })
+            }
             ExprP::Literal(AstLiteral::Int(_)) => err("int"),
             ExprP::Literal(AstLiteral::Float(_)) => err("float"),
+            ExprP::Literal(AstLiteral::Ellipsis) => err("ellipsis"),
             ExprP::Not(..) => err("not"),
             ExprP::Minus(..) => err("minus"),
             ExprP::Plus(..) => err("plus"),
@@ -174,12 +205,7 @@ impl<'a, P: AstPayload> TypeExprUnpackP<'a, P> {
                         codemap,
                     ))
                 } else if xs.len() == 1 {
-                    Ok(Spanned {
-                        span,
-                        node: TypeExprUnpackP::ListOf(Box::new(TypeExprUnpackP::unpack(
-                            &xs[0], codemap,
-                        )?)),
-                    })
+                    err("list of 1 element")
                 } else {
                     let xs = xs.try_map(|x| TypeExprUnpackP::unpack(x, codemap))?;
                     Ok(Spanned {
@@ -188,24 +214,7 @@ impl<'a, P: AstPayload> TypeExprUnpackP<'a, P> {
                     })
                 }
             }
-            ExprP::Dict(xs) => {
-                if xs.len() != 1 {
-                    Err(EvalException::new(
-                        TypeExprUnpackError::DictNot1InType.into(),
-                        expr.span,
-                        codemap,
-                    ))
-                } else {
-                    let (k, v) = &xs[0];
-                    Ok(Spanned {
-                        span,
-                        node: TypeExprUnpackP::DictOf(
-                            Box::new(TypeExprUnpackP::unpack(k, codemap)?),
-                            Box::new(TypeExprUnpackP::unpack(v, codemap)?),
-                        ),
-                    })
-                }
-            }
+            ExprP::Dict(..) => err("dict"),
             ExprP::ListComprehension(..) => err("list comprehension"),
             ExprP::DictComprehension(..) => err("dict comprehension"),
             ExprP::FString(..) => err("f-string"),

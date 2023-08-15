@@ -32,19 +32,30 @@ use crate::typing::Ty;
 use crate::typing::TyBasic;
 use crate::typing::TypingBinOp;
 use crate::typing::TypingUnOp;
+use crate::values::bool::StarlarkBool;
+use crate::values::none::NoneType;
+use crate::values::starlark_type_id::StarlarkTypeId;
+use crate::values::string::StarlarkStr;
 use crate::values::traits::StarlarkValueVTable;
 use crate::values::traits::StarlarkValueVTableGet;
+use crate::values::types::bigint::StarlarkBigInt;
+use crate::values::types::not_type::NotType;
+use crate::values::typing::type_compiled::compiled::TypeCompiled;
+use crate::values::typing::type_compiled::compiled::TypeCompiledImpl;
+use crate::values::Heap;
 use crate::values::StarlarkValue;
+use crate::values::Value;
 
 // This is a bit suboptimal for binary size:
 // we have two vtable instances for each type: this one, and the one within `AValue` vtable.
 struct TyStarlarkValueVTable {
     type_name: &'static str,
     // TODO(nga): put these into generated `StarlarkValueVTable`.
-    has_plus: bool,
-    has_minus: bool,
-    has_bit_not: bool,
     vtable: StarlarkValueVTable,
+    starlark_type_id: StarlarkTypeId,
+    /// `starlark_type_id` is `TypeId` of `T::Canonical`.
+    /// This is `TypeId` of `T::Canonical::Canonical`.
+    starlark_type_id_check: StarlarkTypeId,
 }
 
 struct TyStarlarkValueVTableGet<'v, T: StarlarkValue<'v>>(PhantomData<&'v T>);
@@ -52,10 +63,9 @@ struct TyStarlarkValueVTableGet<'v, T: StarlarkValue<'v>>(PhantomData<&'v T>);
 impl<'v, T: StarlarkValue<'v>> TyStarlarkValueVTableGet<'v, T> {
     const VTABLE: TyStarlarkValueVTable = TyStarlarkValueVTable {
         type_name: T::TYPE,
-        has_plus: T::HAS_PLUS,
-        has_minus: T::HAS_MINUS,
-        has_bit_not: T::HAS_BIT_NOT,
         vtable: StarlarkValueVTableGet::<T>::VTABLE,
+        starlark_type_id: StarlarkTypeId::of_canonical::<T>(),
+        starlark_type_id_check: StarlarkTypeId::of_canonical::<T::Canonical>(),
     };
 }
 
@@ -114,20 +124,37 @@ impl Ord for TyStarlarkValue {
 impl TyStarlarkValue {
     pub(crate) const fn new<'v, T: StarlarkValue<'v>>() -> TyStarlarkValue {
         TyStarlarkValue {
-            vtable: &TyStarlarkValueVTableGet::<T>::VTABLE,
+            vtable: &TyStarlarkValueVTableGet::<T::Canonical>::VTABLE,
         }
     }
 
+    // Cannot have this check in constructor where it belongs because `new` is `const`.
+    #[inline]
+    fn self_check(self) {
+        debug_assert_ne!(
+            self.vtable.starlark_type_id,
+            StarlarkTypeId::of::<NotType>(),
+            "`Canonical` for `{}` is `NotType",
+            self.vtable.type_name
+        );
+        debug_assert_eq!(
+            self.vtable.starlark_type_id, self.vtable.starlark_type_id_check,
+            "`Canonical` for `{}` is not canonical",
+            self.vtable.type_name
+        );
+    }
+
     pub(crate) fn as_name(self) -> &'static str {
+        self.self_check();
         self.vtable.type_name
     }
 
     /// Result of applying unary operator to this type.
     pub(crate) fn un_op(self, un_op: TypingUnOp) -> Result<TyStarlarkValue, ()> {
         let has = match un_op {
-            TypingUnOp::Plus => self.vtable.has_plus,
-            TypingUnOp::Minus => self.vtable.has_minus,
-            TypingUnOp::BitNot => self.vtable.has_bit_not,
+            TypingUnOp::Plus => self.vtable.vtable.HAS_plus,
+            TypingUnOp::Minus => self.vtable.vtable.HAS_minus,
+            TypingUnOp::BitNot => self.vtable.vtable.HAS_bit_not,
         };
         if has { Ok(self) } else { Err(()) }
     }
@@ -138,6 +165,14 @@ impl TyStarlarkValue {
         match (self.vtable.vtable.bin_op_ty)(op, rhs) {
             Some(ty) => Ok(ty),
             None => Err(()),
+        }
+    }
+
+    pub(crate) fn index(self, _index: &TyBasic) -> Result<Ty, ()> {
+        if self.vtable.vtable.HAS_at {
+            Ok(Ty::any())
+        } else {
+            Err(())
         }
     }
 
@@ -163,5 +198,54 @@ impl TyStarlarkValue {
             return Ok(ty);
         }
         Err(())
+    }
+
+    #[inline]
+    pub(crate) fn is_iterable(vtable: &StarlarkValueVTable) -> bool {
+        vtable.HAS_iterate || vtable.HAS_iterate_collect
+    }
+
+    pub(crate) fn iter_item(self) -> Result<Ty, ()> {
+        if Self::is_iterable(&self.vtable.vtable) {
+            Ok(Ty::any())
+        } else {
+            Err(())
+        }
+    }
+
+    /// Convert to runtime type matcher.
+    pub(crate) fn type_compiled<'v>(self, heap: &'v Heap) -> TypeCompiled<Value<'v>> {
+        self.self_check();
+
+        // First handle special cases that can match faster than default matcher.
+        // These are optimizations.
+        if self.vtable.starlark_type_id == StarlarkTypeId::of::<StarlarkBigInt>() {
+            TypeCompiled::type_int()
+        } else if self.vtable.starlark_type_id == StarlarkTypeId::of::<StarlarkBool>() {
+            TypeCompiled::type_bool()
+        } else if self.vtable.starlark_type_id == StarlarkTypeId::of::<NoneType>() {
+            TypeCompiled::type_none()
+        } else if self.vtable.starlark_type_id == StarlarkTypeId::of::<StarlarkStr>() {
+            TypeCompiled::type_string()
+        } else {
+            #[derive(Hash, Eq, PartialEq, Allocative, Debug, Clone)]
+            struct StarlarkTypeIdMatcher {
+                starlark_type_id: StarlarkTypeId,
+            }
+
+            impl TypeCompiledImpl for StarlarkTypeIdMatcher {
+                fn matches(&self, value: Value) -> bool {
+                    value.starlark_type_id() == self.starlark_type_id
+                }
+            }
+
+            TypeCompiled::alloc(
+                StarlarkTypeIdMatcher {
+                    starlark_type_id: self.vtable.starlark_type_id,
+                },
+                Ty::basic(TyBasic::StarlarkValue(self)),
+                heap,
+            )
+        }
     }
 }

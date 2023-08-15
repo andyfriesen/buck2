@@ -33,11 +33,12 @@ use crate::eval::compiler::EvalException;
 use crate::eval::runtime::frame_span::FrameSpan;
 use crate::eval::runtime::frozen_file_span::FrozenFileSpan;
 use crate::slice_vec_ext::VecExt;
+use crate::syntax::ast::AssignP;
 use crate::syntax::ast::ExprP;
 use crate::syntax::ast::StmtP;
 use crate::syntax::type_expr::TypeExprUnpackP;
 use crate::syntax::uniplate::VisitMut;
-use crate::values::typing::type_compiled::TypeCompiled;
+use crate::values::typing::type_compiled::compiled::TypeCompiled;
 use crate::values::FrozenValue;
 use crate::values::Value;
 
@@ -195,15 +196,6 @@ impl<'v> Compiler<'v, '_, '_> {
                 let xs = xs.into_try_map(|x| self.eval_expr_as_type(x))?;
                 Ok(TypeCompiled::type_any_of(xs, self.eval.heap()))
             }
-            TypeExprUnpackP::ListOf(x) => {
-                let x = self.eval_expr_as_type(*x)?;
-                Ok(TypeCompiled::type_list_of(x, self.eval.heap()))
-            }
-            TypeExprUnpackP::DictOf(k, v) => {
-                let k = self.eval_expr_as_type(*k)?;
-                let v = self.eval_expr_as_type(*v)?;
-                Ok(TypeCompiled::type_dict_of(k, v, self.eval.heap()))
-            }
             TypeExprUnpackP::Tuple(xs) => {
                 let xs = xs.into_try_map(|x| self.eval_expr_as_type(x))?;
                 Ok(TypeCompiled::type_tuple_of(xs, self.eval.heap()))
@@ -254,10 +246,10 @@ impl<'v> Compiler<'v, '_, '_> {
         expr.visit_expr_err_mut(|expr| self.populate_types_in_expr(expr))
     }
 
+    #[allow(clippy::collapsible_match)]
     fn populate_types_in_stmt(&mut self, stmt: &mut CstStmt) -> Result<(), EvalException> {
         match &mut stmt.node {
-            StmtP::Assign(_lhs, ty_def) => {
-                let (ty, _) = &mut **ty_def;
+            StmtP::Assign(AssignP { ty, .. }) => {
                 if let Some(ty) = ty {
                     self.populate_types_in_type_expr(ty)?;
                 }

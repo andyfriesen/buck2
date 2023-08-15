@@ -77,21 +77,17 @@ def _compile_with_argsfile(
 
     cmd.add(additional_cmd)
 
-    # T142915880 There is an issue with hard links,
-    # when we compile pcms remotely on linux machines.
-    local_only = True
-
     ctx.actions.run(
         cmd,
         env = get_explicit_modules_env_var(True),
         category = category,
         identifier = module_name,
-        local_only = local_only,
-        allow_cache_upload = local_only,
+        # Swift compiler requires unique inodes for all input files.
+        unique_input_inodes = True,
     )
 
-def _swift_pcm_compilation_impl(ctx: AnalysisContext) -> ["promise", list["provider"]]:
-    def k(compiled_pcm_deps_providers) -> list["provider"]:
+def _swift_pcm_compilation_impl(ctx: AnalysisContext) -> ["promise", list[Provider]]:
+    def k(compiled_pcm_deps_providers) -> list[Provider]:
         uncompiled_pcm_info = ctx.attrs.dep[SwiftPCMUncompiledInfo]
 
         # `compiled_pcm_deps_providers` will contain `WrappedSdkCompiledModuleInfo` providers
@@ -210,10 +206,10 @@ _swift_pcm_compilation = rule(
 
 def compile_underlying_pcm(
         ctx: AnalysisContext,
-        uncompiled_pcm_info: "SwiftPCMUncompiledInfo",
+        uncompiled_pcm_info: SwiftPCMUncompiledInfo.type,
         compiled_pcm_deps_providers,
         swift_cxx_args: list[str],
-        framework_search_path_flags: cmd_args) -> "SwiftPCMCompiledInfo":
+        framework_search_path_flags: cmd_args) -> SwiftPCMCompiledInfo.type:
     module_name = get_module_name(ctx)
 
     # `compiled_pcm_deps_providers` will contain `WrappedSdkCompiledModuleInfo` providers
@@ -261,7 +257,7 @@ def _get_base_pcm_flags(
         uncompiled_pcm_info: SwiftPCMUncompiledInfo.type,
         sdk_deps_tset: SDKDepTSet.type,
         pcm_deps_tset: PcmDepTSet.type,
-        swift_cxx_args: list[str]) -> (cmd_args, cmd_args, "artifact"):
+        swift_cxx_args: list[str]) -> (cmd_args, cmd_args, Artifact):
     swift_toolchain = ctx.attrs._apple_toolchain[AppleToolchainInfo].swift_toolchain_info
 
     cmd = cmd_args()

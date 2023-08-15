@@ -45,8 +45,8 @@ use buck2_events::dispatch::get_dispatcher;
 use buck2_interpreter::load_module::InterpreterCalculation;
 use buck2_interpreter::parse_import::parse_import_with_config;
 use buck2_interpreter::parse_import::ParseImportOptions;
-use buck2_interpreter::path::BxlFilePath;
-use buck2_interpreter::path::StarlarkModulePath;
+use buck2_interpreter::paths::bxl::BxlFilePath;
+use buck2_interpreter::paths::module::StarlarkModulePath;
 use buck2_server_ctx::ctx::ServerCommandContextTrait;
 use buck2_server_ctx::partial_result_dispatcher::PartialResultDispatcher;
 use buck2_server_ctx::pattern::target_platform_from_client_context;
@@ -119,7 +119,7 @@ impl ServerCommandTemplate for BxlServerCommand {
 async fn bxl(
     server_ctx: &dyn ServerCommandContextTrait,
     stdout: impl Write,
-    ctx: DiceTransaction,
+    mut ctx: DiceTransaction,
     request: &BxlRequest,
 ) -> anyhow::Result<buck2_cli_proto::BxlResponse> {
     let cwd = server_ctx.working_dir();
@@ -129,7 +129,7 @@ async fn bxl(
 
     let client_ctx = request.client_context()?;
     let global_target_platform =
-        target_platform_from_client_context(client_ctx, server_ctx, &ctx).await?;
+        target_platform_from_client_context(client_ctx, server_ctx, &mut ctx).await?;
 
     let bxl_args =
         match get_bxl_cli_args(cwd, &ctx, &bxl_label, &request.bxl_args, &cell_resolver).await? {

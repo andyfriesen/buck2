@@ -26,15 +26,18 @@ use buck2_build_api::actions::IncrementalActionExecutable;
 use buck2_build_api::actions::UnregisteredAction;
 use buck2_build_api::artifact_groups::ArtifactGroup;
 use buck2_build_api::artifact_groups::ArtifactGroupValues;
+use buck2_build_api::interpreter::rule_defs::cmd_args::space_separated::SpaceSeparatedCommandLineBuilder;
 use buck2_build_api::interpreter::rule_defs::cmd_args::value_as::ValueAsCommandLineLike;
 use buck2_build_api::interpreter::rule_defs::cmd_args::CommandLineArgLike;
 use buck2_build_api::interpreter::rule_defs::cmd_args::CommandLineArtifactVisitor;
+use buck2_build_api::interpreter::rule_defs::cmd_args::CommandLineContext;
 use buck2_build_api::interpreter::rule_defs::cmd_args::DefaultCommandLineContext;
 use buck2_build_api::interpreter::rule_defs::cmd_args::SimpleCommandLineArtifactVisitor;
 use buck2_build_api::interpreter::rule_defs::provider::builtin::worker_info::WorkerInfo;
 use buck2_core::category::Category;
 use buck2_core::fs::buck_out_path::BuckOutPath;
 use buck2_core::fs::paths::forward_rel_path::ForwardRelativePathBuf;
+use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
 use buck2_execute::artifact::fs::ExecutorFs;
 use buck2_execute::execute::environment_inheritance::EnvironmentInheritance;
 use buck2_execute::execute::request::ActionMetadataBlob;
@@ -159,6 +162,7 @@ pub(crate) struct UnregisteredRunAction {
     pub(crate) metadata_param: Option<MetadataParameter>,
     pub(crate) no_outputs_cleanup: bool,
     pub(crate) allow_cache_upload: bool,
+    pub(crate) allow_dep_file_cache_upload: bool,
     pub(crate) force_full_hybrid_if_capable: bool,
     pub(crate) unique_input_inodes: bool,
 }
@@ -306,12 +310,14 @@ impl RunAction {
             .env
             .into_iter()
             .map(|(k, v)| {
-                let mut env = Vec::<String>::new(); // TODO (torozco): Use a String.
+                let mut env = String::new();
                 let mut ctx = DefaultCommandLineContext::new(fs);
-                v.add_to_command_line(&mut env, &mut ctx)?;
+                v.add_to_command_line(
+                    &mut SpaceSeparatedCommandLineBuilder::wrap_string(&mut env),
+                    &mut ctx,
+                )?;
                 v.visit_artifacts(artifact_visitor)?;
-                let var = env.join(" ");
-                Ok((k.to_owned(), var))
+                Ok((k.to_owned(), env))
             })
             .collect();
 
@@ -354,7 +360,8 @@ impl RunAction {
         visitor: &mut impl RunActionVisitor,
         ctx: &mut dyn ActionExecutionCtx,
     ) -> anyhow::Result<PreparedRunAction> {
-        let fs = ctx.fs();
+        let executor_fs = ctx.executor_fs();
+        let fs = executor_fs.fs();
 
         let (expanded, worker) =
             self.expand_command_line_and_worker(&ctx.executor_fs(), visitor)?;
@@ -373,20 +380,37 @@ impl RunAction {
         // Generate content and output path for the file. It will be either passed
         // to RE as a blob or written to disk in local executor.
         // Path to this file is passed to user in environment variable which is selected by user.
-        let extra_env = if let Some(metadata_param) = &self.inner.metadata_param {
+        let cli_ctx = DefaultCommandLineContext::new(&executor_fs);
+
+        let mut extra_env = Vec::new();
+
+        if let Some(metadata_param) = &self.inner.metadata_param {
             let path = BuckOutPath::new(ctx.target().owner().dupe(), metadata_param.path.clone());
-            let resolved_path = fs.buck_out_path_resolver().resolve_gen(&path);
-            let extra = (metadata_param.env_var.to_owned(), resolved_path.to_string());
+            let env = cli_ctx
+                .resolve_project_path(fs.buck_out_path_resolver().resolve_gen(&path))?
+                .into_string();
             let (data, digest) = metadata_content(fs, &artifact_inputs, ctx.digest_config())?;
             inputs.push(CommandExecutionInput::ActionMetadata(ActionMetadataBlob {
                 data,
                 digest,
                 path,
             }));
-            Some(extra)
-        } else {
-            None
-        };
+            extra_env.push((metadata_param.env_var.to_owned(), env));
+        }
+
+        let scratch = ctx.target().scratch_path();
+        let scratch_path = fs.buck_out_path_resolver().resolve_scratch(&scratch);
+
+        if ctx.run_action_knobs().expose_action_scratch_path {
+            extra_env.push((
+                "BUCK_SCRATCH_PATH".to_owned(),
+                cli_ctx
+                    .resolve_project_path(scratch_path.clone())?
+                    .into_string(),
+            ));
+
+            inputs.push(CommandExecutionInput::ScratchPath(scratch));
+        }
 
         let paths = CommandExecutionPaths::new(
             inputs,
@@ -406,15 +430,17 @@ impl RunAction {
             extra_env,
             paths,
             worker,
+            scratch_path,
         })
     }
 }
 
 pub(crate) struct PreparedRunAction {
     expanded: ExpandedCommandLine,
-    extra_env: Option<(String, String)>,
+    extra_env: Vec<(String, String)>,
     paths: CommandExecutionPaths,
     worker: Option<WorkerSpec>,
+    scratch_path: ProjectRelativePathBuf,
 }
 
 impl PreparedRunAction {
@@ -424,13 +450,16 @@ impl PreparedRunAction {
             extra_env,
             paths,
             worker,
+            scratch_path,
         } = self;
 
-        for (k, v) in extra_env.into_iter() {
+        for (k, v) in extra_env {
             env.insert(k, v);
         }
 
-        CommandExecutionRequest::new(exe, args, paths, env).with_worker(worker)
+        CommandExecutionRequest::new(exe, args, paths, env)
+            .with_worker(worker)
+            .with_scratch_path(scratch_path)
     }
 }
 
@@ -522,6 +551,8 @@ impl Action for RunAction {
                 Some(x) => x.to_string(),
             },
             "no_outputs_cleanup".to_owned() => self.inner.no_outputs_cleanup.to_string(),
+            "allow_cache_upload".to_owned() => self.inner.allow_cache_upload.to_string(),
+            "allow_dep_file_cache_upload".to_owned() => self.inner.allow_dep_file_cache_upload.to_string(),
         }
     }
 }
@@ -534,7 +565,7 @@ impl IncrementalActionExecutable for RunAction {
     ) -> anyhow::Result<(ActionOutputs, ActionExecutionMetadata)> {
         let knobs = ctx.run_action_knobs();
         let process_dep_files = !self.inner.dep_files.labels.is_empty() || knobs.hash_all_commands;
-        let (prepared_run_action, dep_file_bundle) = if !process_dep_files {
+        let (prepared_run_action, dep_file_visitor) = if !process_dep_files {
             (
                 self.prepare(&mut SimpleCommandLineArtifactVisitor::new(), ctx)?,
                 None,
@@ -542,9 +573,9 @@ impl IncrementalActionExecutable for RunAction {
         } else {
             let mut visitor = DepFilesCommandLineVisitor::new(&self.inner.dep_files);
             let prepared = self.prepare(&mut visitor, ctx)?;
-            let dep_file_bundle = make_dep_file_bundle(ctx, visitor, &prepared)?;
-            (prepared, Some(dep_file_bundle))
+            (prepared, Some(visitor))
         };
+        let cmdline_digest = prepared_run_action.expanded.fingerprint();
 
         // Run actions are assumed to be shared
         let host_sharing_requirements = HostSharingRequirements::Shared(self.inner.weight);
@@ -558,13 +589,23 @@ impl IncrementalActionExecutable for RunAction {
             .with_outputs_cleanup(!self.inner.no_outputs_cleanup)
             .with_local_environment_inheritance(EnvironmentInheritance::local_command_exclusions())
             .with_force_full_hybrid_if_capable(self.inner.force_full_hybrid_if_capable)
-            .with_custom_tmpdir(ctx.target().custom_tmpdir())
             .with_unique_input_inodes(self.inner.unique_input_inodes);
+
+        let dep_file_bundle = if let Some(visitor) = dep_file_visitor {
+            Some(make_dep_file_bundle(
+                ctx,
+                visitor,
+                cmdline_digest,
+                req.paths(),
+            )?)
+        } else {
+            None
+        };
 
         // First prepare the action, check the action cache, check dep_files if needed, and execute the command
         let prepared_action = ctx.prepare_action(&req)?;
         let manager = ctx.command_execution_manager();
-        let (mut result, dep_file_bundle) = match ctx
+        let (mut result, mut dep_file_bundle) = match ctx
             .action_cache(manager, &req, &prepared_action)
             .await
         {
@@ -591,14 +632,32 @@ impl IncrementalActionExecutable for RunAction {
             }
         };
 
-        if self.inner.allow_cache_upload {
-            result.did_cache_upload = ctx
-                .cache_upload(prepared_action.action.dupe(), &result, None)
+        // If there is a dep file entry AND if dep file cache upload is enabled, upload it
+        let upload_dep_file = self.inner.allow_dep_file_cache_upload && dep_file_bundle.is_some();
+        if self.inner.allow_cache_upload || upload_dep_file {
+            let (dep_file_entry, dep_file_key) = match &mut dep_file_bundle {
+                Some(dep_file_bundle) if self.inner.allow_dep_file_cache_upload => {
+                    let entry = dep_file_bundle.make_remote_dep_file_entry(ctx).await?;
+                    let key = entry.key.raw_digest().to_string();
+                    (Some(entry), Some(key))
+                }
+                _ => (None, None),
+            };
+            let upload_result = ctx
+                .cache_upload(prepared_action.action.dupe(), &result, dep_file_entry)
                 .await?;
+
+            result.did_cache_upload = upload_result.did_cache_upload;
+            result.did_dep_file_cache_upload = upload_result.did_dep_file_cache_upload;
+            result.dep_file_key = dep_file_key;
         }
 
-        let (outputs, metadata) =
-            ctx.unpack_command_execution_result(&req, result, self.inner.allow_cache_upload)?;
+        let (outputs, metadata) = ctx.unpack_command_execution_result(
+            &req,
+            result,
+            self.inner.allow_cache_upload,
+            self.inner.allow_dep_file_cache_upload,
+        )?;
 
         if let Some(dep_file_bundle) = dep_file_bundle {
             populate_dep_files(ctx, dep_file_bundle, &outputs).await?;

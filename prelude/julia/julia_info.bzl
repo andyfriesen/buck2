@@ -24,9 +24,9 @@ JllInfo = record(
 
 JuliaLibrary = record(
     uuid = str,
-    src_labels = "",
-    srcs = "",
-    project_toml = "",
+    src_labels = typing.Any,
+    srcs = typing.Any,
+    project_toml = typing.Any,
     label = field(Label),
     jll = field([JllInfo.type, None]),
 )
@@ -51,15 +51,15 @@ JuliaLibraryInfo = provider(fields = [
 ])
 
 def create_julia_library_info(
-        actions: "actions",
+        actions: AnalysisActions,
         label: Label,
         uuid: str = "",
-        src_labels: "" = [],
-        project_toml: "" = None,
-        srcs: "" = [],
+        src_labels: typing.Any = [],
+        project_toml: typing.Any = None,
+        srcs: typing.Any = [],
         deps: list[JuliaLibraryInfo.type] = [],
         jll: [JllInfo.type, None] = None,
-        shlibs: list[SharedLibraryInfo.type] = []) -> "JuliaLibraryInfo":
+        shlibs: list[SharedLibraryInfo.type] = []) -> JuliaLibraryInfo.type:
     julia_tsets = JuliaLibrary(
         uuid = uuid,
         label = label,

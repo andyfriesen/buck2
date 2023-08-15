@@ -7,7 +7,7 @@
  * of this source tree.
  */
 
-use buck2_common::legacy_configs::cells::DaemonStartupConfig;
+use buck2_common::legacy_configs::init::DaemonStartupConfig;
 use buck2_core::env_helper::EnvHelper;
 
 use crate::version::BuckVersion;
@@ -19,7 +19,7 @@ pub fn gen_daemon_constraints(
         version: version(),
         user_version: user_version()?,
         daemon_id: buck2_events::daemon_id::DAEMON_UUID.to_string(),
-        daemon_startup_config: Some(daemon_startup_config.serialize()),
+        daemon_startup_config: Some(daemon_startup_config.serialize()?),
         extra: None,
     })
 }

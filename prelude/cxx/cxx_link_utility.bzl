@@ -61,7 +61,7 @@ def make_link_args(
         suffix = None,
         output_short_path: [str, None] = None,
         is_shared: [bool, None] = None,
-        link_ordering: ["LinkOrdering", None] = None) -> (ArgLike, list["_hidden"], ["artifact", None]):
+        link_ordering: ["LinkOrdering", None] = None) -> (ArgLike, list[typing.Any], [Artifact, None]):
     """
     Merges LinkArgs. Returns the args, files that must be present for those
     args to work when passed to a linker, and optionally an artifact where DWO
@@ -122,7 +122,7 @@ def make_link_args(
 
     return (args, [args] + hidden, pdb_artifact)
 
-def shared_libs_symlink_tree_name(output: "artifact") -> str:
+def shared_libs_symlink_tree_name(output: Artifact) -> str:
     return "__{}__shared_libs_symlink_tree".format(output.short_path)
 
 # Returns a tuple of:
@@ -130,10 +130,10 @@ def shared_libs_symlink_tree_name(output: "artifact") -> str:
 # - list of files/directories that should be present for executable to be run successfully
 # - optional shared libs symlink tree symlinked_dir action
 def executable_shared_lib_arguments(
-        actions: "actions",
+        actions: AnalysisActions,
         cxx_toolchain: CxxToolchainInfo.type,
-        output: "artifact",
-        shared_libs: dict[str, "LinkedObject"]) -> (list[""], list[ArgLike], ["artifact", None]):
+        output: Artifact,
+        shared_libs: dict[str, "LinkedObject"]) -> (list[typing.Any], list[ArgLike], [Artifact, None]):
     extra_args = []
     runtime_files = []
     shared_libs_symlink_tree = None
@@ -164,7 +164,7 @@ def executable_shared_lib_arguments(
 
     return (extra_args, runtime_files, shared_libs_symlink_tree)
 
-def cxx_link_cmd_parts(ctx: AnalysisContext) -> ("RunInfo", cmd_args):
+def cxx_link_cmd_parts(ctx: AnalysisContext) -> (RunInfo.type, cmd_args):
     toolchain = get_cxx_toolchain_info(ctx)
 
     # `toolchain_linker_flags` can either be a list of strings, `cmd_args` or `None`,

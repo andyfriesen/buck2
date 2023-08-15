@@ -19,9 +19,9 @@ def get_path_separator() -> str:
     # On UNIX systems, this character is ':'; on Microsoft Windows systems it is ';'.
     return ":"
 
-def derive_javac(javac_attribute: [str, Dependency, "artifact"]) -> [str, "RunInfo", "artifact"]:
+def derive_javac(javac_attribute: [str, Dependency, Artifact]) -> [str, RunInfo.type, Artifact]:
     javac_attr_type = type(javac_attribute)
-    if javac_attr_type == "dependency":
+    if isinstance(javac_attribute, Dependency):
         javac_run_info = javac_attribute.get(RunInfo)
         if javac_run_info:
             return javac_run_info
@@ -81,8 +81,8 @@ def get_abi_generation_mode(abi_generation_mode):
     }[abi_generation_mode]
 
 def get_default_info(
-        actions: "actions",
-        java_toolchain: "JavaToolchainInfo",
+        actions: AnalysisActions,
+        java_toolchain: JavaToolchainInfo.type,
         outputs: ["JavaCompileOutputs", None],
         packaging_info: "JavaPackagingInfo",
         extra_sub_targets: dict = {}) -> DefaultInfo.type:
@@ -135,7 +135,7 @@ def get_class_to_source_map_info(
     )
     return (class_to_src_map_info, sub_targets)
 
-def get_classpath_subtarget(actions: "actions", packaging_info: "JavaPackagingInfo") -> dict[str, list["provider"]]:
+def get_classpath_subtarget(actions: AnalysisActions, packaging_info: "JavaPackagingInfo") -> dict[str, list[Provider]]:
     proj = packaging_info.packaging_deps.project_as_args("full_jar_args")
     output = actions.write("classpath", proj)
     return {"classpath": [DefaultInfo(output, other_outputs = [proj])]}

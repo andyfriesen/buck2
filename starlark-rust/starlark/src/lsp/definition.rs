@@ -30,7 +30,7 @@ use crate::lsp::exported::Symbol;
 use crate::lsp::loaded::LoadedSymbol;
 use crate::slice_vec_ext::SliceExt;
 use crate::syntax::ast::ArgumentP;
-use crate::syntax::ast::AssignP;
+use crate::syntax::ast::AssignTargetP;
 use crate::syntax::ast::AstIdent;
 use crate::syntax::ast::AstLiteral;
 use crate::syntax::ast::AstNoPayload;
@@ -39,6 +39,7 @@ use crate::syntax::ast::Expr;
 use crate::syntax::ast::ExprP;
 use crate::syntax::ast::Stmt;
 use crate::syntax::ast::StmtP;
+use crate::syntax::top_level_stmts::top_level_stmts;
 use crate::syntax::uniplate::Visit;
 use crate::syntax::AstModule;
 
@@ -477,11 +478,10 @@ impl LspModule {
         let mut identifier_span = None;
         let mut symbol_to_lookup = None;
 
-        'outer: for v in self.ast.top_level_statements() {
-            if let StmtP::Assign(l, ty_r) = &v.node {
-                let (_ty, r) = &**ty_r;
-                let main_assign_span = match &l.node {
-                    AssignP::Identifier(main_assign_id) if main_assign_id.0 == name => {
+        'outer: for v in top_level_stmts(&self.ast.statement) {
+            if let StmtP::Assign(assign) = &v.node {
+                let main_assign_span = match &assign.lhs.node {
+                    AssignTargetP::Identifier(main_assign_id) if main_assign_id.0 == name => {
                         main_assign_id.span
                     }
                     _ => {
@@ -494,7 +494,7 @@ impl LspModule {
                 }
 
                 // Look for a function call to `struct`.
-                if let ExprP::Call(function_name, args) = &r.node {
+                if let ExprP::Call(function_name, args) = &assign.rhs.node {
                     match &function_name.node {
                         ExprP::Identifier(function_name) if function_name.node.0 == "struct" => {}
                         _ => {
@@ -809,7 +809,7 @@ mod test {
         x = 1
         y = 2
 
-        def add(y: "int"):
+        def add(y: int):
             return x + y
 
         def invalid_symbol():
@@ -856,7 +856,7 @@ mod test {
         x = 1
         y = 2
 
-        def <add>add</add>(y: "int"):
+        def <add>add</add>(y: int):
             return x + y
 
         def <invalid_symbol>invalid_symbol</invalid_symbol>():
@@ -920,7 +920,7 @@ mod test {
         <x>x</x> = 1
         y = 2
 
-        def add(y: "int"):
+        def add(y: int):
             return x + y
 
         def invalid_symbol():
@@ -959,7 +959,7 @@ mod test {
         <x>x</x> = 1
         <y1>y</y1> = 2
 
-        def add(<y2>y</y2>: "int"):
+        def add(<y2>y</y2>: int):
             return <x_var>x</x_var> + <y_var1>y</y_var1>
 
         def invalid_symbol():
@@ -1031,7 +1031,7 @@ mod test {
         x = 1
         y = 2
 
-        def <no_def>add</no_def>(y: "int"):
+        def <no_def>add</no_def>(y: int):
             return x + y
 
         def invalid_symbol():

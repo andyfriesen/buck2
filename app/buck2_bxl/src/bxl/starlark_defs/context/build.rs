@@ -15,6 +15,7 @@ use allocative::Allocative;
 use buck2_artifact::artifact::artifact_type::Artifact;
 use buck2_artifact::artifact::build_artifact::BuildArtifact;
 use buck2_build_api::build::build_configured_label;
+use buck2_build_api::build::BuildConfiguredLabelOptions;
 use buck2_build_api::build::BuildTargetResult;
 use buck2_build_api::build::ConvertMaterializationContext;
 use buck2_build_api::build::ProvidersToBuild;
@@ -169,20 +170,26 @@ where
 }
 
 pub(crate) fn build<'v>(
-    ctx: &'v BxlContext<'v>,
+    ctx: &BxlContext<'v>,
     materializations_map: &Arc<DashMap<BuildArtifact, ()>>,
     spec: Value<'v>,
     target_platform: Value<'v>,
     materializations: Materializations,
     eval: &Evaluator<'v, '_>,
 ) -> anyhow::Result<SmallMap<Value<'v>, Value<'v>>> {
-    let build_spec =
-        ProvidersExpr::<ConfiguredProvidersLabel>::unpack(spec, target_platform, ctx, eval)?;
-
     let materializations =
         ConvertMaterializationContext::with_existing_map(materializations, materializations_map);
 
     let build_result = ctx.async_ctx.via_dice(async move |dice| {
+        let build_spec = ProvidersExpr::<ConfiguredProvidersLabel>::unpack(
+            spec,
+            target_platform,
+            ctx,
+            dice,
+            eval,
+        )
+        .await?;
+
         let materializations = &materializations;
 
         let stream = build_spec
@@ -199,7 +206,10 @@ pub(crate) fn build<'v>(
                         run: true,
                         tests: true,
                     }, // TODO support skipping/configuring?
-                    false,
+                    BuildConfiguredLabelOptions {
+                        skippable: false,
+                        want_configured_graph_size: false,
+                    },
                 )
                 .await;
 

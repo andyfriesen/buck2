@@ -7,7 +7,7 @@
 
 load("@fbcode_macros//build_defs:platform_utils.bzl", "platform_utils")
 
-def _symlinked_buck2_and_tpx_impl(ctx: "context") -> ["provider"]:
+def _symlinked_buck2_and_tpx_impl(ctx: AnalysisContext) -> list[Provider]:
     """
     Produce a directory layout that is similar to the one our release binary
     uses, this allows setting a path for Tpx relative to BUCK2_BINARY_DIR.
@@ -28,7 +28,10 @@ def _symlinked_buck2_and_tpx_impl(ctx: "context") -> ["provider"]:
 
     return [DefaultInfo(out), RunInfo(cmd)]
 
-_symlinked_buck2_and_tpx = rule(impl = _symlinked_buck2_and_tpx_impl, attrs = {"buck2": attrs.dep(), "tpx": attrs.dep()})
+_symlinked_buck2_and_tpx = rule(
+    impl = _symlinked_buck2_and_tpx_impl,
+    attrs = {"buck2": attrs.dep(), "labels": attrs.list(attrs.string(), default = []), "tpx": attrs.dep()},
+)
 
 def symlinked_buck2_and_tpx(**kwargs):
     cxx_platform = platform_utils.get_cxx_platform_for_base_path(native.package_name())

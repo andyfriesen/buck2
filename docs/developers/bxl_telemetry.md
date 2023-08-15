@@ -9,7 +9,7 @@ title:  BXL Telemetry
 
 In BXL, you can emit custom events via `ctx.instant_event()`, which takes in two named parameters:
 * `id`: string, identifies your event. Helpful to identify your event when looking through event logs. Ids do not have to be unique in a single BXL script.
-* `metadata`: dict, where keys are strings and values are strings, bools, or ints. You can put any metadata you wish here.
+* `metadata`: dict, where keys are strings, and values are strings, bools, ints, or lists/dicts of the mentioned types. You can put any metadata you wish here.
 
 Example:
 
@@ -17,7 +17,7 @@ Example:
 def _impl(ctx):
   ctx.instant_event(id = "id1", metadata = {"foo": "bar"})
 
-my_script = bxl(
+my_script = bxl_main(
   impl = _impl,
   cli_args = {},
 )
@@ -37,7 +37,7 @@ def _impl(ctx):
   end = instant.elapsed_millis()
   ctx.instant_event(id = "id2", metadata = {"duration": end})
 
-my_script = bxl(
+my_script = bxl_main(
   impl = _impl,
   cli_args = {},
 )
@@ -78,7 +78,15 @@ Sample:
       "bool_value": true,
       "string_value": "str",
       "int_value": 123,
-    }
+      "list_value": [
+        "a",
+        "b",
+        "c"
+      ],
+      "dict_value": {
+        "foo": "bar"
+      }
+    },
   },
   "epoch_millis": 123456789 # when the event was emitted
 }

@@ -32,12 +32,12 @@ use buck2_interpreter::file_type::StarlarkFileType;
 use buck2_interpreter::import_paths::ImplicitImportPaths;
 use buck2_interpreter::package_imports::ImplicitImport;
 use buck2_interpreter::parse_import::parse_import;
-use buck2_interpreter::path::BxlFilePath;
-use buck2_interpreter::path::OwnedStarlarkModulePath;
-use buck2_interpreter::path::OwnedStarlarkPath;
-use buck2_interpreter::path::PackageFilePath;
-use buck2_interpreter::path::StarlarkModulePath;
-use buck2_interpreter::path::StarlarkPath;
+use buck2_interpreter::paths::bxl::BxlFilePath;
+use buck2_interpreter::paths::module::OwnedStarlarkModulePath;
+use buck2_interpreter::paths::module::StarlarkModulePath;
+use buck2_interpreter::paths::package::PackageFilePath;
+use buck2_interpreter::paths::path::OwnedStarlarkPath;
+use buck2_interpreter::paths::path::StarlarkPath;
 use buck2_interpreter::prelude_path::PreludePath;
 use buck2_interpreter::print_handler::EventDispatcherPrintHandler;
 use buck2_node::nodes::eval_result::EvaluationResult;
@@ -53,6 +53,7 @@ use thiserror::Error;
 
 use crate::interpreter::build_context::BuildContext;
 use crate::interpreter::build_context::PerFileTypeContext;
+use crate::interpreter::bzl_eval_ctx::BzlEvalCtx;
 use crate::interpreter::cell_info::InterpreterCellInfo;
 use crate::interpreter::global_interpreter_state::GlobalInterpreterState;
 use crate::interpreter::module_internals::ModuleInternals;
@@ -271,19 +272,11 @@ impl InterpreterForCell {
                         "Should've had an env for the prelude import `{}` (internal error)",
                         prelude_import,
                     )
-                })?
-                .env();
-            env.import_public_symbols(prelude_env);
+                })?;
+            env.import_public_symbols(prelude_env.env());
             if let StarlarkPath::BuildFile(_) = starlark_path {
-                if let Some(native) = prelude_env.get_option("native")? {
-                    let native = native.value();
-                    for attr in native.dir_attr() {
-                        if let Some(value) = native.get_attr(&attr, env.heap())? {
-                            env.set(&attr, value);
-                        } else {
-                            // Should not be possible.
-                        }
-                    }
+                for (name, value) in prelude_env.extra_globals_from_prelude_for_buck_files()? {
+                    env.set(name, value.to_value());
                 }
             }
         }
@@ -303,7 +296,6 @@ impl InterpreterForCell {
         super_package: SuperPackage,
         package_boundary_exception: bool,
         loaded_modules: &LoadedModules,
-        check_within_view: bool,
     ) -> anyhow::Result<(Module, ModuleInternals)> {
         let internals = self.global_state.configuror.new_extra_context(
             self.get_cell_config(build_file.build_file_cell()),
@@ -313,7 +305,6 @@ impl InterpreterForCell {
             package_boundary_exception,
             loaded_modules,
             self.package_import(build_file),
-            check_within_view,
         )?;
         let env = self.create_env(StarlarkPath::BuildFile(build_file), loaded_modules)?;
 
@@ -372,10 +363,15 @@ impl InterpreterForCell {
         if let Some(prelude_import) = prelude_import {
             let import_path = import.path();
 
-            // Only return the prelude for things outside the prelude directory.
-            if import.unpack_build_file().is_some() || !prelude_import.is_prelude_path(&import_path)
-            {
-                return Some(prelude_import);
+            match import {
+                StarlarkPath::BuildFile(_) => return Some(prelude_import),
+                StarlarkPath::PackageFile(_)
+                | StarlarkPath::BxlFile(_)
+                | StarlarkPath::LoadFile(_) => {
+                    if !prelude_import.is_prelude_path(&import_path) {
+                        return Some(prelude_import);
+                    }
+                }
             }
         }
 
@@ -441,6 +437,7 @@ impl InterpreterForCell {
         loaded_modules: LoadedModules,
         extra_context: PerFileTypeContext,
         eval_provider: &mut dyn StarlarkEvaluatorProvider,
+        unstable_typecheck: bool,
     ) -> anyhow::Result<PerFileTypeContext> {
         let import = extra_context.starlark_path();
         let globals = self
@@ -462,6 +459,7 @@ impl InterpreterForCell {
         let print = EventDispatcherPrintHandler(get_dispatcher());
         {
             let mut eval = eval_provider.make(env)?;
+            eval.enable_static_typechecking(unstable_typecheck);
             eval.set_print_handler(&print);
             eval.set_loader(&file_loader);
             eval.extra = Some(&extra);
@@ -496,14 +494,21 @@ impl InterpreterForCell {
         eval_provider: &mut dyn StarlarkEvaluatorProvider,
     ) -> anyhow::Result<FrozenModule> {
         let env = self.create_env(starlark_path.into(), &loaded_modules)?;
+        let extra_context = match starlark_path {
+            StarlarkModulePath::LoadFile(bzl) => PerFileTypeContext::Bzl(BzlEvalCtx {
+                bzl_path: bzl.clone(),
+            }),
+            StarlarkModulePath::BxlFile(bxl) => PerFileTypeContext::Bxl(bxl.clone()),
+        };
         self.eval(
             &env,
             ast,
             buckconfig,
             root_buckconfig,
             loaded_modules,
-            PerFileTypeContext::for_module(starlark_path),
+            extra_context,
             eval_provider,
+            self.global_state.unstable_typecheck,
         )?;
         env.freeze()
     }
@@ -523,14 +528,12 @@ impl InterpreterForCell {
             &loaded_modules,
         )?;
 
-        let extra_context = PerFileTypeContext::Package(
-            package_file_path.clone(),
-            PackageFileEvalCtx {
-                parent,
-                package_values: RefCell::new(SmallMap::new()),
-                visibility: RefCell::new(None),
-            },
-        );
+        let extra_context = PerFileTypeContext::Package(PackageFileEvalCtx {
+            path: package_file_path.clone(),
+            parent,
+            package_values: RefCell::new(SmallMap::new()),
+            visibility: RefCell::new(None),
+        });
 
         let per_file_context = self.eval(
             &env,
@@ -540,6 +543,7 @@ impl InterpreterForCell {
             loaded_modules,
             extra_context,
             eval_provider,
+            false,
         )?;
 
         let package_file_eval_ctx = per_file_context.into_package_file()?;
@@ -562,17 +566,12 @@ impl InterpreterForCell {
         loaded_modules: LoadedModules,
         eval_provider: &mut dyn StarlarkEvaluatorProvider,
     ) -> anyhow::Result<EvaluationResult> {
-        // TODO(nga): fix and inline as true.
-        let check_within_view = root_buckconfig
-            .parse("buck2", "check_within_view")?
-            .unwrap_or(true);
         let (env, internals) = self.create_build_env(
             build_file,
             &listing,
             super_package,
             package_boundary_exception,
             &loaded_modules,
-            check_within_view,
         )?;
         let internals = self
             .eval(
@@ -581,8 +580,9 @@ impl InterpreterForCell {
                 buckconfig,
                 root_buckconfig,
                 loaded_modules,
-                PerFileTypeContext::Build(build_file.clone(), internals),
+                PerFileTypeContext::Build(internals),
                 eval_provider,
+                false,
             )?
             .into_build()?;
 

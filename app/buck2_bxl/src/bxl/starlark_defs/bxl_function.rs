@@ -15,8 +15,8 @@ use std::sync::Arc;
 use allocative::Allocative;
 use anyhow::Context;
 use buck2_build_api::bxl::types::BxlFunctionLabel;
-use buck2_interpreter::build_context::STARLARK_PATH_FROM_BUILD_CONTEXT;
-use buck2_interpreter::path::BxlFilePath;
+use buck2_interpreter::build_context::starlark_path_from_build_context;
+use buck2_interpreter::paths::bxl::BxlFilePath;
 use buck2_util::collections::ordered_map::OrderedMap;
 use cli_args::CliArgs;
 use derive_more::Display;
@@ -48,18 +48,6 @@ use crate::bxl::starlark_defs::cli_args::CliArgValue;
 
 #[starlark_module]
 pub(crate) fn register_bxl_function(builder: &mut GlobalsBuilder) {
-    /// Deprecated alias for `bxl_main`.
-    ///
-    /// The goal is to eventually remove this function and make `bxl` a namespace.
-    fn bxl<'v>(
-        #[starlark(require = named)] r#impl: Value<'v>,
-        #[starlark(require = named)] cli_args: DictOf<'v, &'v str, &'v CliArgs>,
-        #[starlark(require = named, default = "")] doc: &str,
-        eval: &mut Evaluator<'v, '_>,
-    ) -> anyhow::Result<Value<'v>> {
-        bxl_impl(r#impl, cli_args, doc, eval)
-    }
-
     fn bxl_main<'v>(
         #[starlark(require = named)] r#impl: Value<'v>,
         #[starlark(require = named)] cli_args: DictOf<'v, &'v str, &'v CliArgs>,
@@ -78,7 +66,7 @@ fn bxl_impl<'v>(
 ) -> anyhow::Result<Value<'v>> {
     let implementation = r#impl;
 
-    let bxl_path = (*(STARLARK_PATH_FROM_BUILD_CONTEXT.get()?)(eval)?
+    let bxl_path = (*starlark_path_from_build_context(eval)?
         .unpack_bxl_file()
         .ok_or_else(|| anyhow::anyhow!("`bxl` can only be declared in bxl files"))?)
     .clone();
@@ -109,7 +97,7 @@ fn bxl_impl<'v>(
 /// Errors around rule declaration, instantiation, validation, etc
 #[derive(Debug, Error)]
 enum BxlError {
-    #[error("Bxl defined in `{0}` must be assigned to a variable, e.g. `my_bxl = bxl(...)`")]
+    #[error("Bxl defined in `{0}` must be assigned to a variable, e.g. `my_bxl = bxl_main(...)`")]
     BxlNotAssigned(String),
 }
 

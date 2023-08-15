@@ -31,11 +31,15 @@ use starlark_map::StarlarkHasher;
 
 use crate::codemap::Span;
 use crate::codemap::Spanned;
-use crate::typing::error::TypingError;
+use crate::typing::error::TypingOrInternalError;
 use crate::typing::Arg;
 use crate::typing::Ty;
+use crate::typing::TyBasic;
 use crate::typing::TypingAttr;
 use crate::typing::TypingOracleCtx;
+use crate::values::typing::type_compiled::compiled::TypeCompiled;
+use crate::values::typing::type_compiled::factory::TypeCompiledFactory;
+use crate::values::Value;
 
 /// Custom type implementation. [`Display`] must implement the representation of the type.
 pub trait TyCustomImpl:
@@ -47,13 +51,16 @@ pub trait TyCustomImpl:
         span: Span,
         _args: &[Spanned<Arg>],
         oracle: TypingOracleCtx,
-    ) -> Result<Ty, TypingError> {
+    ) -> Result<Ty, TypingOrInternalError> {
         Err(oracle.msg_error(span, format!("Value of type `{}` is not callable", self)))
     }
     fn attribute(&self, attr: TypingAttr) -> Result<Ty, ()>;
     fn union2(x: Box<Self>, other: Box<Self>) -> Result<Box<Self>, (Box<Self>, Box<Self>)> {
         if x == other { Ok(x) } else { Err((x, other)) }
     }
+
+    /// Create runtime type matcher for values.
+    fn matcher<'v>(&self, factory: TypeCompiledFactory<'v>) -> TypeCompiled<Value<'v>>;
 }
 
 pub(crate) trait TyCustomDyn: Debug + Display + Allocative + Send + Sync + 'static {
@@ -69,12 +76,17 @@ pub(crate) trait TyCustomDyn: Debug + Display + Allocative + Send + Sync + 'stat
         span: Span,
         args: &[Spanned<Arg>],
         oracle: TypingOracleCtx,
-    ) -> Result<Ty, TypingError>;
+    ) -> Result<Ty, TypingOrInternalError>;
     fn attribute_dyn(&self, attr: TypingAttr) -> Result<Ty, ()>;
     fn union2_dyn(
         self: Box<Self>,
         other: Box<dyn TyCustomDyn>,
     ) -> Result<Box<dyn TyCustomDyn>, (Box<dyn TyCustomDyn>, Box<dyn TyCustomDyn>)>;
+
+    fn matcher_dyn<'v>(
+        &self,
+        type_compiled_factory: TypeCompiledFactory<'v>,
+    ) -> TypeCompiled<Value<'v>>;
 }
 
 impl<T: TyCustomImpl> TyCustomDyn for T {
@@ -109,7 +121,7 @@ impl<T: TyCustomImpl> TyCustomDyn for T {
         span: Span,
         args: &[Spanned<Arg>],
         oracle: TypingOracleCtx,
-    ) -> Result<Ty, TypingError> {
+    ) -> Result<Ty, TypingOrInternalError> {
         self.validate_call(span, args, oracle)
     }
 
@@ -129,6 +141,13 @@ impl<T: TyCustomImpl> TyCustomDyn for T {
         } else {
             Err((self, other))
         }
+    }
+
+    fn matcher_dyn<'v>(
+        &self,
+        type_compiled_factory: TypeCompiledFactory<'v>,
+    ) -> TypeCompiled<Value<'v>> {
+        self.matcher(type_compiled_factory)
     }
 }
 
@@ -156,6 +175,20 @@ impl TyCustom {
         } else {
             false
         }
+    }
+
+    pub(crate) fn intersects_with(&self, other: &TyBasic) -> bool {
+        match other {
+            TyBasic::Custom(other) => Self::intersects(self, other),
+            _ => false,
+        }
+    }
+
+    pub(crate) fn matcher<'v>(
+        &self,
+        type_compiled_factory: TypeCompiledFactory<'v>,
+    ) -> TypeCompiled<Value<'v>> {
+        self.0.matcher_dyn(type_compiled_factory)
     }
 }
 

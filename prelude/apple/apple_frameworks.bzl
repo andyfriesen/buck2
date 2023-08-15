@@ -18,6 +18,7 @@ load(
     "LinkInfos",
     "LinkInfosTSet",
     "LinkableType",
+    "MergedLinkInfo",
     "SwiftRuntimeLinkable",  # @unused Used as a type
     "SwiftmoduleLinkable",  # @unused Used as a type
     "get_link_args",
@@ -68,7 +69,7 @@ def _get_framework_search_path_flags(frameworks: list[cmd_args]) -> cmd_args:
 
     return flags
 
-def _get_non_sdk_unresolved_framework_directories(frameworks: list[""]) -> list[""]:
+def _get_non_sdk_unresolved_framework_directories(frameworks: list[typing.Any]) -> list[typing.Any]:
     # We don't want to include SDK directories as those are already added via `isysroot` flag in toolchain definition.
     # Adding those directly via `-F` will break building Catalyst applications as frameworks from support directory
     # won't be found and those for macOS platform will be used.
@@ -126,27 +127,27 @@ def _non_sdk_unresolved_framework_directory(framework_path: str) -> [str, None]:
 
 def apple_build_link_args_with_deduped_flags(
         ctx: AnalysisContext,
-        info: "MergedLinkInfo",
+        merged: MergedLinkInfo.type,
         frameworks_linkable: [FrameworksLinkable.type, None],
         link_style: "LinkStyle",
         prefer_stripped: bool = False,
         swiftmodule_linkable: [SwiftmoduleLinkable.type, None] = None,
         swift_runtime_linkable: [SwiftRuntimeLinkable.type, None] = None) -> LinkArgs.type:
-    link_info = _link_info_from_linkables(ctx, [info.frameworks[link_style], frameworks_linkable], [swiftmodule_linkable], [info.swift_runtime[link_style], swift_runtime_linkable])
+    link_info = _link_info_from_linkables(ctx, [merged.frameworks[link_style], frameworks_linkable], [swiftmodule_linkable], [merged.swift_runtime[link_style], swift_runtime_linkable])
     if not link_info:
-        return get_link_args(info, link_style, prefer_stripped)
+        return get_link_args(merged, link_style, prefer_stripped)
 
     return LinkArgs(
         tset = LinkArgsTSet(
             infos = ctx.actions.tset(
                 LinkInfosTSet,
                 value = LinkInfos(default = link_info, stripped = link_info),
-                children = [info._infos[link_style]],
+                children = [merged._infos[link_style]],
             ),
             external_debug_info = make_artifact_tset(
                 actions = ctx.actions,
                 label = ctx.label,
-                children = [link_info.external_debug_info, info._external_debug_info[link_style]],
+                children = [link_info.external_debug_info, merged._external_debug_info[link_style]],
             ),
             prefer_stripped = prefer_stripped,
         ),
@@ -179,8 +180,8 @@ def _extract_framework_linkables(link_infos: [list[LinkInfo.type], None]) -> lis
     frameworks_type = LinkableType("frameworks")
 
     linkables = []
-    for info in link_infos:
-        for linkable in info.linkables:
+    for merged in link_infos:
+        for linkable in merged.linkables:
             if linkable._type == frameworks_type:
                 linkables.append(linkable)
 

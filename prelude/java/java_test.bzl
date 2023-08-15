@@ -11,14 +11,14 @@ load(
     "merge_class_to_source_map_from_jar",
 )
 load("@prelude//java:java_library.bzl", "build_java_library")
-load("@prelude//java:java_providers.bzl", "get_all_java_packaging_deps_tset")
+load("@prelude//java:java_providers.bzl", "JavaLibraryInfo", "JavaPackagingInfo", "get_all_java_packaging_deps_tset")
 load("@prelude//java:java_toolchain.bzl", "JavaTestToolchainInfo", "JavaToolchainInfo")
 load("@prelude//java/utils:java_utils.bzl", "get_path_separator")
 load("@prelude//linking:shared_libraries.bzl", "SharedLibraryInfo", "merge_shared_libraries", "traverse_shared_library_info")
 load("@prelude//utils:utils.bzl", "expect")
 load("@prelude//test/inject_test_run_info.bzl", "inject_test_run_info")
 
-def java_test_impl(ctx: AnalysisContext) -> list["provider"]:
+def java_test_impl(ctx: AnalysisContext) -> list[Provider]:
     if ctx.attrs._build_only_native_code:
         return [DefaultInfo()]
 
@@ -35,11 +35,11 @@ def java_test_impl(ctx: AnalysisContext) -> list["provider"]:
 
 def build_junit_test(
         ctx: AnalysisContext,
-        tests_java_library_info: "JavaLibraryInfo",
-        tests_java_packaging_info: "JavaPackagingInfo",
+        tests_java_library_info: JavaLibraryInfo.type,
+        tests_java_packaging_info: JavaPackagingInfo.type,
         tests_class_to_source_info: [JavaClassToSourceMapInfo.type, None] = None,
         extra_cmds: list = [],
-        extra_classpath_entries: list["artifact"] = []) -> ExternalRunnerTestInfo.type:
+        extra_classpath_entries: list[Artifact] = []) -> ExternalRunnerTestInfo.type:
     java_test_toolchain = ctx.attrs._java_test_toolchain[JavaTestToolchainInfo]
 
     java = ctx.attrs.java[RunInfo] if ctx.attrs.java else ctx.attrs._java_toolchain[JavaToolchainInfo].java_for_tests

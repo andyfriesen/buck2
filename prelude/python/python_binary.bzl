@@ -69,7 +69,7 @@ load(
     ":interface.bzl",
     "PythonLibraryInterface",  # @unused Used as a type
 )
-load(":make_pex.bzl", "PexModules", "PexProviders", "make_default_info", "make_pex")
+load(":make_py_package.bzl", "PexModules", "PexProviders", "make_default_info", "make_py_package")
 load(
     ":manifest.bzl",
     "create_dep_manifest_for_source_map",
@@ -272,7 +272,6 @@ def _get_link_group_info(
         # We add user-defined mappings last, so that our auto-generated
         # ones get precedence (as we rely on this for things to work).
         link_groups = [s.group for s in root_specs] + shared_groups
-
         if link_group_info != None:
             link_groups += link_group_info.groups.values()
 
@@ -287,9 +286,10 @@ def _get_link_group_info(
 def python_executable(
         ctx: AnalysisContext,
         main_module: str,
-        srcs: dict[str, "artifact"],
-        resources: dict[str, ("artifact", list[ArgLike])],
-        compile: bool = False) -> PexProviders.type:
+        srcs: dict[str, Artifact],
+        resources: dict[str, (Artifact, list[ArgLike])],
+        compile: bool,
+        allow_cache_upload: bool) -> PexProviders.type:
     # Returns a three tuple: the Python binary, all its potential runtime files,
     # and a provider for its source DB.
 
@@ -342,12 +342,13 @@ def python_executable(
 
     dbg_source_db = create_dbg_source_db(ctx, src_manifest, python_deps)
 
-    exe = convert_python_library_to_executable(
+    exe = _convert_python_library_to_executable(
         ctx,
         main_module,
         info_to_interface(library_info),
         flatten(raw_deps),
         compile,
+        allow_cache_upload,
         dbg_source_db,
     )
     if python_toolchain.emit_dependency_metadata:
@@ -377,13 +378,14 @@ def create_dep_report(
     ctx.actions.run(cmd, category = "write_dep_report")
     return DefaultInfo(default_output = out)
 
-def convert_python_library_to_executable(
+def _convert_python_library_to_executable(
         ctx: AnalysisContext,
         main_module: str,
         library: PythonLibraryInterface.type,
         deps: list[Dependency],
-        compile: bool = False,
-        dbg_source_db: [DefaultInfo.type, None] = None) -> PexProviders.type:
+        compile: bool,
+        allow_cache_upload: bool,
+        dbg_source_db: [DefaultInfo.type, None]) -> PexProviders.type:
     extra = {}
 
     python_toolchain = ctx.attrs._python_toolchain[PythonToolchainInfo]
@@ -561,6 +563,7 @@ def convert_python_library_to_executable(
                 extension_info.dlopen_deps.values() +
                 extension_info.shared_only_libs.values()
             ),
+            exe_allow_cache_upload = allow_cache_upload,
         )
 
         executable_info = cxx_executable(ctx, impl_params)
@@ -628,23 +631,24 @@ def convert_python_library_to_executable(
     hidden_resources = library.hidden_resources() if library.has_hidden_resources() else None
 
     # Build the PEX.
-    pex = make_pex(
+    pex = make_py_package(
         ctx,
         python_toolchain,
-        ctx.attrs.make_pex[RunInfo] if ctx.attrs.make_pex != None else None,
+        ctx.attrs.make_py_package[RunInfo] if ctx.attrs.make_py_package != None else None,
         package_style,
         ctx.attrs.build_args,
         pex_modules,
         shared_libraries,
         main_module,
         hidden_resources,
+        allow_cache_upload,
     )
 
     pex.sub_targets.update(extra)
 
     return pex
 
-def python_binary_impl(ctx: AnalysisContext) -> list["provider"]:
+def python_binary_impl(ctx: AnalysisContext) -> list[Provider]:
     main_module = ctx.attrs.main_module
     if ctx.attrs.main_module != None and ctx.attrs.main != None:
         fail("Only one of main_module or main may be set. Prefer main_module as main is considered deprecated")
@@ -669,6 +673,7 @@ def python_binary_impl(ctx: AnalysisContext) -> list["provider"]:
         srcs,
         {},
         compile = value_or(ctx.attrs.compile, False),
+        allow_cache_upload = ctx.attrs.allow_cache_upload,
     )
     return [
         make_default_info(pex),

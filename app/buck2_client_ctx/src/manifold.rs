@@ -12,12 +12,11 @@ use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
-use buck2_common::http;
-use buck2_common::http::counting_client::CountingHttpClient;
 use buck2_common::http::retries::http_retry;
 use buck2_common::http::retries::AsHttpError;
 use buck2_common::http::retries::HttpError;
 use buck2_common::http::HttpClient;
+use buck2_common::http::HttpClientBuilder;
 use bytes::Bytes;
 use dupe::Dupe;
 use futures::stream::BoxStream;
@@ -148,13 +147,13 @@ fn log_upload_url(use_vpnless: bool) -> Option<&'static str> {
 }
 
 pub struct ManifoldClient {
-    client: CountingHttpClient,
+    client: HttpClient,
     manifold_url: Option<String>,
 }
 
 impl ManifoldClient {
     pub fn new(allow_vpnless: bool) -> anyhow::Result<Self> {
-        let client = http::http_client(allow_vpnless)?;
+        let client = HttpClientBuilder::with_sensible_defaults(allow_vpnless)?.build();
         let manifold_url = log_upload_url(client.supports_vpnless()).map(|s| s.to_owned());
 
         Ok(Self {

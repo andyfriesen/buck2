@@ -30,9 +30,9 @@ use buck2_interpreter::factory::StarlarkPassthroughProvider;
 use buck2_interpreter::file_loader::LoadedModule;
 use buck2_interpreter::file_loader::LoadedModules;
 use buck2_interpreter::import_paths::ImplicitImportPaths;
-use buck2_interpreter::path::OwnedStarlarkModulePath;
-use buck2_interpreter::path::StarlarkModulePath;
-use buck2_interpreter::path::StarlarkPath;
+use buck2_interpreter::paths::module::OwnedStarlarkModulePath;
+use buck2_interpreter::paths::module::StarlarkModulePath;
+use buck2_interpreter::paths::path::StarlarkPath;
 use buck2_interpreter::prelude_path::PreludePath;
 use buck2_node::nodes::eval_result::EvaluationResult;
 use buck2_node::nodes::targets_map::TargetsMap;
@@ -218,6 +218,7 @@ impl Tester {
                     }))),
                 )?,
                 false,
+                false,
             )?),
             Arc::new(import_paths),
         )?))
@@ -336,7 +337,6 @@ impl Tester {
         def assert_eq(a, b):
             if a != b:
                 fail("expected: %s got %s" % (a, b))
-
         "#
             )
             .to_owned()
@@ -399,7 +399,12 @@ impl Tester {
 
             def assert_ne(a, b):
                 if a == b:
-                    fail("expected: %s to not equal %s" % (a, b))"#
+                    fail("expected: %s to not equal %s" % (a, b))
+
+            def assert_true(c):
+                if not c:
+                    fail("assertion failed")
+            "#
         );
 
         self.add_import(&import_path, &format!("{}\n\n{}", template, content))?;

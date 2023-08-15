@@ -30,7 +30,7 @@ use crate::eval::compiler::scope::ResolvedIdent;
 use crate::eval::compiler::scope::ScopeId;
 use crate::syntax::ast::AstArgumentP;
 use crate::syntax::ast::AstAssignIdentP;
-use crate::syntax::ast::AstAssignP;
+use crate::syntax::ast::AstAssignTargetP;
 use crate::syntax::ast::AstExprP;
 use crate::syntax::ast::AstIdentP;
 use crate::syntax::ast::AstNoPayload;
@@ -42,7 +42,7 @@ use crate::syntax::ast::AstTypeExprP;
 use crate::syntax::payload_map::AstPayloadFunction;
 use crate::typing::error::InternalError;
 use crate::typing::Interface;
-use crate::values::typing::type_compiled::TypeCompiled;
+use crate::values::typing::type_compiled::compiled::TypeCompiled;
 use crate::values::FrozenValue;
 
 /// Compiler-specific AST payload.
@@ -129,7 +129,7 @@ impl CstAssignIdent {
 
 pub(crate) type CstExpr = AstExprP<CstPayload>;
 pub(crate) type CstTypeExpr = AstTypeExprP<CstPayload>;
-pub(crate) type CstAssign = AstAssignP<CstPayload>;
+pub(crate) type CstAssign = AstAssignTargetP<CstPayload>;
 pub(crate) type CstAssignIdent = AstAssignIdentP<CstPayload>;
 pub(crate) type CstIdent = AstIdentP<CstPayload>;
 pub(crate) type CstArgument = AstArgumentP<CstPayload>;

@@ -15,7 +15,7 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum HttpError {
-    #[error("HTTP Client error: {0}")]
+    #[error(transparent)]
     Client(#[from] crate::http::HttpError),
 
     #[error("HTTP Transfer Error when querying URL: {}. Failed after {} bytes", .url, .received)]
@@ -34,7 +34,8 @@ impl HttpError {
                 crate::http::HttpError::Status { status, .. } => {
                     status.is_server_error() || *status == StatusCode::TOO_MANY_REQUESTS
                 }
-                crate::http::HttpError::SendRequest(..) => true,
+                crate::http::HttpError::Timeout { .. } => true,
+                crate::http::HttpError::SendRequest { .. } => true,
                 _ => false,
             },
             Self::Transfer { source, .. } => !source.is_connect(),

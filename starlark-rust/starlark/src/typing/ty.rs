@@ -52,7 +52,7 @@ use crate::typing::structs::TyStruct;
 use crate::values::bool::StarlarkBool;
 use crate::values::tuple::value::FrozenTuple;
 use crate::values::typing::never::TypingNever;
-use crate::values::typing::type_compiled::TypeCompiled;
+use crate::values::typing::type_compiled::compiled::TypeCompiled;
 use crate::values::FrozenValue;
 use crate::values::Heap;
 use crate::values::StarlarkValue;
@@ -185,6 +185,14 @@ impl Ty {
         }
     }
 
+    /// Create a named type.
+    ///
+    /// This function is deprecated because types should be migrated to either
+    /// types based on `StarlarkValue` or `TyCustom`.
+    pub fn name_deprecated(name: &str) -> Self {
+        Self::name(name)
+    }
+
     /// Turn a type back into a name, potentially erasing some structure.
     /// E.g. the type `[bool]` would return `list`.
     /// Types like [`Ty::any`] will return `None`.
@@ -298,7 +306,8 @@ impl Ty {
         Self::custom(TyCustomFunction(TyFunction::any()))
     }
 
-    pub(crate) const fn starlark_value<'v, T: StarlarkValue<'v>>() -> Self {
+    /// Type from the implementation of [`StarlarkValue`].
+    pub const fn starlark_value<'v, T: StarlarkValue<'v>>() -> Self {
         Ty::basic(TyBasic::starlark_value::<T>())
     }
 
@@ -447,11 +456,6 @@ impl Ty {
             TypeExprUnpackP::Union(xs) => {
                 Ty::unions(xs.map(|x| Self::from_expr_impl(x, approximations)))
             }
-            TypeExprUnpackP::ListOf(x) => Ty::list(Self::from_expr_impl(x, approximations)),
-            TypeExprUnpackP::DictOf(k, v) => Ty::dict(
-                Self::from_expr_impl(k, approximations),
-                Self::from_expr_impl(v, approximations),
-            ),
             TypeExprUnpackP::Literal(x) => {
                 if x.is_empty() || x.starts_with('_') {
                     Ty::any()

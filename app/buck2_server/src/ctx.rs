@@ -37,7 +37,7 @@ use buck2_common::dice::cells::HasCellResolver;
 use buck2_common::dice::cycles::CycleDetectorAdapter;
 use buck2_common::dice::cycles::PairDiceCycleDetector;
 use buck2_common::dice::data::HasIoProvider;
-use buck2_common::http::counting_client::CountingHttpClient;
+use buck2_common::http::HttpClient;
 use buck2_common::http::SetHttpClient;
 use buck2_common::invocation_paths::InvocationPaths;
 use buck2_common::io::trace::TracingIoProvider;
@@ -92,10 +92,7 @@ use buck2_interpreter::extra::InterpreterHostPlatform;
 use buck2_interpreter::prelude_path::prelude_path;
 use buck2_interpreter_for_build::interpreter::configuror::BuildInterpreterConfiguror;
 use buck2_interpreter_for_build::interpreter::cycles::LoadCycleDescriptor;
-use buck2_interpreter_for_build::interpreter::globals::configure_build_file_globals;
-use buck2_interpreter_for_build::interpreter::globals::configure_bxl_file_globals;
-use buck2_interpreter_for_build::interpreter::globals::configure_extension_file_globals;
-use buck2_interpreter_for_build::interpreter::globals::configure_package_file_globals;
+use buck2_interpreter_for_build::interpreter::globals::register_universal_natives;
 use buck2_interpreter_for_build::interpreter::interpreter_setup::setup_interpreter;
 use buck2_server_ctx::concurrency::DiceDataProvider;
 use buck2_server_ctx::concurrency::DiceUpdater;
@@ -189,6 +186,7 @@ pub struct ServerCommandContext<'a> {
     record_target_call_stacks: bool,
     skip_targets_with_duplicate_names: bool,
     disable_starlark_types: bool,
+    unstable_typecheck: bool,
 
     pub buck_out_dir: ProjectRelativePathBuf,
     isolation_prefix: FileNameBuf,
@@ -322,6 +320,7 @@ impl<'a> ServerCommandContext<'a> {
             record_target_call_stacks: client_context.target_call_stacks,
             skip_targets_with_duplicate_names: client_context.skip_targets_with_duplicate_names,
             disable_starlark_types: client_context.disable_starlark_types,
+            unstable_typecheck: client_context.unstable_typecheck,
             heartbeat_guard_handle: Some(heartbeat_guard_handle),
             daemon_uuid_from_client: client_context.daemon_uuid.clone(),
             command_name: client_context.command_name.clone(),
@@ -437,6 +436,7 @@ impl<'a> ServerCommandContext<'a> {
                 .starlark_profiler_instrumentation_override
                 .dupe(),
             disable_starlark_types: self.disable_starlark_types,
+            unstable_typecheck: self.unstable_typecheck,
             skip_targets_with_duplicate_names: self.skip_targets_with_duplicate_names,
             record_target_call_stacks: self.record_target_call_stacks,
         })
@@ -516,7 +516,7 @@ struct DiceCommandDataProvider {
     create_unhashed_symlink_lock: Arc<Mutex<()>>,
     starlark_debugger: Option<BuckStarlarkDebuggerHandle>,
     keep_going: bool,
-    http_client: CountingHttpClient,
+    http_client: HttpClient,
     paranoid: Option<ParanoidDownloader>,
     spawner: Arc<BuckSpawner>,
 }
@@ -592,6 +592,10 @@ impl DiceDataProvider for DiceCommandDataProvider {
         run_action_knobs.enforce_re_timeouts = root_config
             .parse::<bool>("buck2", "enforce_re_timeouts")?
             .unwrap_or(true);
+
+        run_action_knobs.expose_action_scratch_path = root_config
+            .parse::<bool>("buck2", "expose_action_scratch_path")?
+            .unwrap_or(false);
 
         let mut data = UserComputationData {
             data,
@@ -669,6 +673,7 @@ struct DiceCommandUpdater {
     interpreter_xcode_version: Option<XcodeVersionInfo>,
     starlark_profiler_instrumentation_override: StarlarkProfilerConfiguration,
     disable_starlark_types: bool,
+    unstable_typecheck: bool,
     record_target_call_stacks: bool,
     skip_targets_with_duplicate_names: bool,
 }
@@ -694,10 +699,10 @@ impl DiceUpdater for DiceCommandUpdater {
             self.interpreter_xcode_version.clone(),
             self.record_target_call_stacks,
             self.skip_targets_with_duplicate_names,
-            configure_build_file_globals,
-            configure_package_file_globals,
-            configure_extension_file_globals,
-            configure_bxl_file_globals,
+            register_universal_natives,
+            register_universal_natives,
+            register_universal_natives,
+            register_universal_natives,
             None,
         )?;
 
@@ -713,6 +718,7 @@ impl DiceUpdater for DiceCommandUpdater {
             legacy_configs,
             self.starlark_profiler_instrumentation_override.dupe(),
             self.disable_starlark_types,
+            self.unstable_typecheck,
         )?;
 
         Ok(ctx)

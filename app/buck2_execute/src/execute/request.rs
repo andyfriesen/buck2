@@ -52,6 +52,7 @@ pub struct ActionMetadataBlob {
 pub enum CommandExecutionInput {
     Artifact(Box<dyn ArtifactGroupValuesDyn>),
     ActionMetadata(ActionMetadataBlob),
+    ScratchPath(BuckOutScratchPath),
 }
 
 #[derive(PartialEq, Eq, Debug, Copy, Clone, Dupe, Hash)]
@@ -268,7 +269,7 @@ pub struct CommandExecutionRequest {
     timeout: Option<Duration>,
     executor_preference: ExecutorPreference,
     // Run with a custom $TMPDIR, or just the standard system one
-    custom_tmpdir: Option<BuckOutScratchPath>,
+    scratch_path: Option<ProjectRelativePathBuf>,
     host_sharing_requirements: HostSharingRequirements,
     // Used to disable the low pass filter for concurrent local actions. Enabled by default
     low_pass_filter: bool,
@@ -309,7 +310,7 @@ impl CommandExecutionRequest {
             env,
             timeout: None,
             executor_preference: ExecutorPreference::Default,
-            custom_tmpdir: None,
+            scratch_path: None,
             host_sharing_requirements: HostSharingRequirements::default(),
             low_pass_filter: true,
             working_directory: None,
@@ -338,12 +339,12 @@ impl CommandExecutionRequest {
         self
     }
 
-    pub fn custom_tmpdir(&self) -> &Option<BuckOutScratchPath> {
-        &self.custom_tmpdir
+    pub fn scratch_path(&self) -> Option<&ProjectRelativePath> {
+        self.scratch_path.as_deref()
     }
 
-    pub fn with_custom_tmpdir(mut self, custom_tmpdir: BuckOutScratchPath) -> Self {
-        self.custom_tmpdir = Some(custom_tmpdir);
+    pub fn with_scratch_path(mut self, scratch_path: ProjectRelativePathBuf) -> Self {
+        self.scratch_path = Some(scratch_path);
         self
     }
 
@@ -503,7 +504,9 @@ impl CommandExecutionRequest {
 }
 
 /// Is an output a file or a directory
-#[derive(PartialEq, Eq, Hash, Debug, Copy, Clone, Dupe, Allocative)]
+#[derive(
+    PartialEq, Eq, Hash, Debug, Copy, Clone, Dupe, Allocative, Ord, PartialOrd
+)]
 pub enum OutputType {
     /// We don't know - used to represent legacy code that doesn't yet declare the output type properly.
     /// We aim to mostly remove this alternative over time.

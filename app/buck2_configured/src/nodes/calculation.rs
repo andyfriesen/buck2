@@ -32,7 +32,12 @@ use buck2_core::configuration::transition::applied::TransitionApplied;
 use buck2_core::configuration::transition::id::TransitionId;
 use buck2_core::execution_types::execution::ExecutionPlatform;
 use buck2_core::execution_types::execution::ExecutionPlatformResolution;
+use buck2_core::plugins::PluginKind;
+use buck2_core::plugins::PluginKindSet;
+use buck2_core::plugins::PluginListElemKind;
+use buck2_core::plugins::PluginLists;
 use buck2_core::provider::label::ConfiguredProvidersLabel;
+use buck2_core::provider::label::ProvidersLabel;
 use buck2_core::target::configured_target_label::ConfiguredTargetLabel;
 use buck2_core::target::label::TargetLabel;
 use buck2_execute::execute::dice_data::HasFallbackExecutorConfig;
@@ -118,6 +123,12 @@ enum ToolchainDepError {
     ToolchainRuleUsedAsNormalDep(TargetLabel),
     #[error("Target `{0}` has a transition_dep, which is not permitted on a toolchain rule")]
     ToolchainTransitionDep(TargetLabel),
+}
+
+#[derive(Debug, Error)]
+enum PluginDepError {
+    #[error("Plugin dep `{0}` is a toolchain rule")]
+    PluginDepIsToolchainRule(TargetLabel),
 }
 
 pub async fn find_execution_platform_by_configuration(
@@ -268,7 +279,7 @@ async fn execution_platforms_for_toolchain(
         type Value = SharedResult<ToolchainConstraints>;
         async fn compute(
             &self,
-            ctx: &DiceComputations,
+            ctx: &mut DiceComputations,
             _cancellation: &CancellationContext,
         ) -> Self::Value {
             let node = ctx.get_target_node(self.0.unconfigured()).await?;
@@ -550,6 +561,27 @@ fn check_compatible(
     )))
 }
 
+/// Ideally, we would check this much earlier. However, that turns out to be a bit tricky to
+/// implement. Naively implementing this check on unconfigured nodes doesn't work because it results
+/// in dice cycles when there are cycles in the unconfigured graph.
+async fn check_plugin_deps_are_not_toolchains(
+    ctx: &DiceComputations,
+    plugin_deps: &PluginLists,
+) -> anyhow::Result<()> {
+    for (_, target, elem_kind) in plugin_deps.iter() {
+        if *elem_kind == PluginListElemKind::Direct {
+            let dep_node = ctx
+                .get_target_node(target)
+                .await
+                .with_context(|| format!("looking up unconfigured target node `{}`", target))?;
+            if dep_node.is_toolchain_rule() {
+                return Err(PluginDepError::PluginDepIsToolchainRule(target.dupe()).into());
+            }
+        }
+    }
+    Ok(())
+}
+
 #[derive(Default)]
 struct ErrorsAndIncompatibilities {
     errs: Vec<anyhow::Error>,
@@ -557,12 +589,20 @@ struct ErrorsAndIncompatibilities {
 }
 
 impl ErrorsAndIncompatibilities {
-    pub fn unpack_dep(
+    pub fn unpack_dep_into(
         &mut self,
         target_label: &ConfiguredTargetLabel,
         result: anyhow::Result<MaybeCompatible<ConfiguredTargetNode>>,
         list: &mut Vec<ConfiguredTargetNode>,
     ) {
+        list.extend(self.unpack_dep(target_label, result));
+    }
+
+    fn unpack_dep(
+        &mut self,
+        target_label: &ConfiguredTargetLabel,
+        result: anyhow::Result<MaybeCompatible<ConfiguredTargetNode>>,
+    ) -> Option<ConfiguredTargetNode> {
         match result {
             Err(e) => {
                 self.errs.push(e);
@@ -576,7 +616,7 @@ impl ErrorsAndIncompatibilities {
             Ok(MaybeCompatible::Compatible(dep)) => {
                 match dep.is_visible_to(target_label.unconfigured()) {
                     Ok(true) => {
-                        list.push(dep);
+                        return Some(dep);
                     }
                     Ok(false) => {
                         self.errs
@@ -591,6 +631,7 @@ impl ErrorsAndIncompatibilities {
                 }
             }
         }
+        None
     }
 
     /// Returns an error/incompatibility to return, if any, and `None` otherwise
@@ -611,6 +652,7 @@ struct GatheredDeps {
     deps: Vec<ConfiguredTargetNode>,
     exec_deps: SmallSet<ConfiguredProvidersLabel>,
     toolchain_deps: SmallSet<ConfiguredProvidersLabel>,
+    plugin_lists: PluginLists,
 }
 
 async fn gather_deps(
@@ -621,14 +663,27 @@ async fn gather_deps(
 ) -> anyhow::Result<(GatheredDeps, ErrorsAndIncompatibilities)> {
     #[derive(Default)]
     struct Traversal {
-        deps: SmallSet<ConfiguredProvidersLabel>,
+        deps: OrderedMap<ConfiguredProvidersLabel, SmallSet<PluginKindSet>>,
         exec_deps: SmallSet<ConfiguredProvidersLabel>,
         toolchain_deps: SmallSet<ConfiguredProvidersLabel>,
+        plugin_lists: PluginLists,
     }
 
     impl ConfiguredAttrTraversal for Traversal {
         fn dep(&mut self, dep: &ConfiguredProvidersLabel) -> anyhow::Result<()> {
-            self.deps.insert(dep.clone());
+            self.deps.entry(dep.clone()).or_insert_with(SmallSet::new);
+            Ok(())
+        }
+
+        fn dep_with_plugins(
+            &mut self,
+            dep: &ConfiguredProvidersLabel,
+            plugin_kinds: &PluginKindSet,
+        ) -> anyhow::Result<()> {
+            self.deps
+                .entry(dep.clone())
+                .or_insert_with(SmallSet::new)
+                .insert(plugin_kinds.dupe());
             Ok(())
         }
 
@@ -639,6 +694,12 @@ async fn gather_deps(
 
         fn toolchain_dep(&mut self, dep: &ConfiguredProvidersLabel) -> anyhow::Result<()> {
             self.toolchain_deps.insert(dep.clone());
+            Ok(())
+        }
+
+        fn plugin_dep(&mut self, dep: &TargetLabel, kind: &PluginKind) -> anyhow::Result<()> {
+            self.plugin_lists
+                .insert(kind.dupe(), dep.dupe(), PluginListElemKind::Direct);
             Ok(())
         }
     }
@@ -652,22 +713,57 @@ async fn gather_deps(
     let dep_futures = traversal
         .deps
         .iter()
-        .map(|v| ctx.get_configured_target_node(v.target()));
+        .map(|v| ctx.get_configured_target_node(v.0.target()));
     let dep_results =
         ConfiguredGraphCycleDescriptor::guard_this(ctx, futures::future::join_all(dep_futures))
             .await??;
 
+    let mut plugin_lists = traversal.plugin_lists;
     let mut deps = Vec::new();
     let mut errors_and_incompats = ErrorsAndIncompatibilities::default();
-    for res in dep_results {
-        errors_and_incompats.unpack_dep(target_label, res, &mut deps);
+    for (res, (_, plugin_kind_sets)) in dep_results.into_iter().zip(traversal.deps) {
+        let Some(dep) = errors_and_incompats.unpack_dep(target_label, res) else {
+            continue;
+        };
+
+        if !plugin_kind_sets.is_empty() {
+            for (kind, plugins) in dep.plugin_lists().iter_by_kind() {
+                let Some(should_propagate) = plugin_kind_sets
+                    .iter()
+                    .filter_map(|set| set.get(kind))
+                    .reduce(std::ops::BitOr::bitor)
+                else {
+                    continue;
+                };
+                let should_propagate = if should_propagate {
+                    PluginListElemKind::Propagate
+                } else {
+                    PluginListElemKind::NoPropagate
+                };
+                for (target, elem_kind) in plugins {
+                    if *elem_kind != PluginListElemKind::NoPropagate {
+                        plugin_lists.insert(kind.dupe(), target.dupe(), should_propagate);
+                    }
+                }
+            }
+        }
+
+        deps.push(dep);
+    }
+
+    let mut exec_deps = traversal.exec_deps;
+    for kind in target_node.uses_plugins() {
+        exec_deps.extend(plugin_lists.iter_for_kind(kind).map(|(target, _)| {
+            attr_cfg_ctx.configure_exec_target(&ProvidersLabel::default_for(target.dupe()))
+        }));
     }
 
     Ok((
         GatheredDeps {
             deps,
-            exec_deps: traversal.exec_deps,
+            exec_deps,
             toolchain_deps: traversal.toolchain_deps,
+            plugin_lists,
         },
         errors_and_incompats,
     ))
@@ -720,6 +816,8 @@ async fn compute_configured_target_node_no_transition(
     );
     let (gathered_deps, mut errors_and_incompats) =
         gather_deps(target_label, &target_node, &attr_cfg_ctx, ctx).await?;
+
+    check_plugin_deps_are_not_toolchains(ctx, &gathered_deps.plugin_lists).await?;
 
     let execution_platform_resolution = if target_cfg.is_unbound() {
         // The unbound configuration is used when evaluation configuration nodes.
@@ -782,10 +880,10 @@ async fn compute_configured_target_node_no_transition(
     let mut exec_deps = Vec::with_capacity(gathered_deps.exec_deps.len());
 
     for dep in toolchain_dep_results {
-        errors_and_incompats.unpack_dep(target_label, dep, &mut deps);
+        errors_and_incompats.unpack_dep_into(target_label, dep, &mut deps);
     }
     for dep in exec_dep_results {
-        errors_and_incompats.unpack_dep(target_label, dep, &mut exec_deps);
+        errors_and_incompats.unpack_dep_into(target_label, dep, &mut exec_deps);
     }
 
     if let Some(ret) = errors_and_incompats.finalize() {
@@ -801,6 +899,7 @@ async fn compute_configured_target_node_no_transition(
         deps,
         exec_deps,
         platform_cfgs,
+        gathered_deps.plugin_lists,
     )))
 }
 
@@ -869,7 +968,7 @@ async fn compute_configured_target_node(
 
             async fn compute(
                 &self,
-                ctx: &DiceComputations,
+                ctx: &mut DiceComputations,
                 _cancellation: &CancellationContext,
             ) -> SharedResult<MaybeCompatible<ConfiguredTargetNode>> {
                 compute_configured_target_node_with_transition(self, ctx)
@@ -942,7 +1041,7 @@ impl ConfiguredTargetNodeCalculationImpl for ConfiguredTargetNodeCalculationInst
             type Value = SharedResult<MaybeCompatible<ConfiguredTargetNode>>;
             async fn compute(
                 &self,
-                ctx: &DiceComputations,
+                ctx: &mut DiceComputations,
                 _cancellation: &CancellationContext,
             ) -> Self::Value {
                 let res = compute_configured_target_node(self, ctx).await;

@@ -77,7 +77,7 @@ use crate::values::string::dot_format::format_one;
 use crate::values::string::interpolation::percent_s_one;
 use crate::values::types::known_methods::KnownMethod;
 use crate::values::types::list::value::ListData;
-use crate::values::typing::type_compiled::TypeCompiled;
+use crate::values::typing::type_compiled::compiled::TypeCompiled;
 use crate::values::FrozenRef;
 use crate::values::FrozenStringValue;
 use crate::values::FrozenValue;
@@ -892,6 +892,26 @@ impl InstrNoFlowImpl for InstrTypeIsImpl {
     ) -> anyhow::Result<()> {
         let arg = frame.get_bc_slot(*arg);
         let r = arg.get_type_value() == *t;
+        frame.set_bc_slot(*target, Value::new_bool(r));
+        Ok(())
+    }
+}
+
+pub(crate) struct InstrIsInstanceImpl;
+pub(crate) type InstrIsInstance = InstrNoFlow<InstrIsInstanceImpl>;
+
+impl InstrNoFlowImpl for InstrIsInstanceImpl {
+    type Arg = (BcSlotIn, TypeCompiled<FrozenValue>, BcSlotOut);
+
+    #[inline(always)]
+    fn run_with_args<'v>(
+        _eval: &mut Evaluator<'v, '_>,
+        frame: BcFramePtr<'v>,
+        _: BcPtrAddr,
+        (arg, t, target): &(BcSlotIn, TypeCompiled<FrozenValue>, BcSlotOut),
+    ) -> anyhow::Result<()> {
+        let arg = frame.get_bc_slot(*arg);
+        let r = t.matches(arg);
         frame.set_bc_slot(*target, Value::new_bool(r));
         Ok(())
     }

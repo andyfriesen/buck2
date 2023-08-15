@@ -26,7 +26,7 @@ use buck2_core::fs::project::ProjectRoot;
 use buck2_core::package::PackageLabel;
 use buck2_interpreter::file_loader::LoadedModule;
 use buck2_interpreter::load_module::InterpreterCalculation;
-use buck2_interpreter::path::StarlarkModulePath;
+use buck2_interpreter::paths::module::StarlarkModulePath;
 use buck2_node::nodes::eval_result::EvaluationResult;
 use buck2_node::nodes::frontend::TargetGraphCalculation;
 use buck2_query::query::environment::LabeledNode;
@@ -141,7 +141,7 @@ async fn get_transitive_includes(
 }
 
 async fn load_and_collect_includes(
-    ctx: &DiceComputations,
+    ctx: &mut DiceComputations,
     path: &CellPath,
 ) -> SharedResult<Vec<ImportPath>> {
     let parent = path
@@ -210,12 +210,12 @@ impl AuditSubcommand for AuditIncludesCommand {
                     .unique()
                     .map(|path| {
                         let path = path.to_owned();
-                        let ctx = ctx.dupe();
+                        let mut ctx = ctx.dupe();
                         let cell_path = resolve_path(&cells, fs, &current_cell_abs_path, &path);
                         async move {
                             let load_result = try {
                                 let cell_path = cell_path?;
-                                load_and_collect_includes(&ctx, &cell_path).await?
+                                load_and_collect_includes(&mut ctx, &cell_path).await?
                             };
                             (path, load_result)
                         }

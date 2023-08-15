@@ -12,16 +12,22 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use buck2_artifact::actions::key::ActionKey;
 use buck2_build_api::actions::query::ActionQueryNode;
+use buck2_build_api::actions::query::ActionQueryNodeRef;
+use buck2_build_api::artifact_groups::ArtifactGroup;
 use buck2_core::configuration::compatibility::MaybeCompatible;
 use buck2_query::query::environment::QueryEnvironment;
 use buck2_query::query::syntax::simple::eval::error::QueryError;
 use buck2_query::query::syntax::simple::eval::file_set::FileSet;
 use buck2_query::query::syntax::simple::eval::set::TargetSet;
+use buck2_query::query::syntax::simple::functions::docs::QueryEnvironmentDescription;
+use buck2_query::query::syntax::simple::functions::DefaultQueryFunctionsModule;
+use buck2_query::query::syntax::simple::functions::HasModuleDescription;
 use buck2_query::query::traversal::async_depth_first_postorder_traversal;
 use buck2_query::query::traversal::async_depth_limited_traversal;
 use buck2_query::query::traversal::AsyncNodeLookup;
 use buck2_query::query::traversal::AsyncTraversalDelegate;
 
+use crate::aquery::functions::AqueryFunctions;
 use crate::cquery::environment::CqueryDelegate;
 use crate::uquery::environment::QueryLiterals;
 
@@ -31,10 +37,15 @@ pub trait AqueryDelegate: Send + Sync {
     fn cquery_delegate(&self) -> &dyn CqueryDelegate;
 
     async fn get_node(&self, key: &ActionKey) -> anyhow::Result<ActionQueryNode>;
+
+    async fn expand_artifacts(
+        &self,
+        artifacts: &[ArtifactGroup],
+    ) -> anyhow::Result<Vec<ActionQueryNode>>;
 }
 
 pub struct AqueryEnvironment<'c> {
-    delegate: Arc<dyn AqueryDelegate + 'c>,
+    pub(super) delegate: Arc<dyn AqueryDelegate + 'c>,
     literals: Arc<dyn QueryLiterals<ActionQueryNode> + 'c>,
 }
 
@@ -46,14 +57,25 @@ impl<'c> AqueryEnvironment<'c> {
         Self { delegate, literals }
     }
 
-    async fn get_node(&self, label: &ActionKey) -> anyhow::Result<ActionQueryNode> {
-        self.delegate.get_node(label).await
+    async fn get_node(&self, label: &ActionQueryNodeRef) -> anyhow::Result<ActionQueryNode> {
+        // We do not allow traversing edges in targets in aquery
+        self.delegate.get_node(label.require_action()?).await
+    }
+
+    pub(crate) fn describe() -> QueryEnvironmentDescription {
+        QueryEnvironmentDescription {
+            name: "Aquery Environment".to_owned(),
+            mods: vec![
+                DefaultQueryFunctionsModule::<Self>::describe(),
+                AqueryFunctions::describe(),
+            ],
+        }
     }
 }
 
 #[async_trait]
 impl<'a> AsyncNodeLookup<ActionQueryNode> for AqueryEnvironment<'a> {
-    async fn get(&self, label: &ActionKey) -> anyhow::Result<ActionQueryNode> {
+    async fn get(&self, label: &ActionQueryNodeRef) -> anyhow::Result<ActionQueryNode> {
         self.get_node(label).await
     }
 }
@@ -62,13 +84,13 @@ impl<'a> AsyncNodeLookup<ActionQueryNode> for AqueryEnvironment<'a> {
 impl<'c> QueryEnvironment for AqueryEnvironment<'c> {
     type Target = ActionQueryNode;
 
-    async fn get_node(&self, node_ref: &ActionKey) -> anyhow::Result<Self::Target> {
+    async fn get_node(&self, node_ref: &ActionQueryNodeRef) -> anyhow::Result<Self::Target> {
         AqueryEnvironment::get_node(self, node_ref).await
     }
 
     async fn get_node_for_default_configured_target(
         &self,
-        _node_ref: &ActionKey,
+        _node_ref: &ActionQueryNodeRef,
     ) -> anyhow::Result<MaybeCompatible<Self::Target>> {
         Err(QueryError::FunctionUnimplemented(
             "get_node_for_default_configured_target() only for CqueryEnvironment",

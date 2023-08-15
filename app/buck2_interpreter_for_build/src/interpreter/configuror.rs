@@ -19,7 +19,7 @@ use buck2_interpreter::extra::InterpreterHostArchitecture;
 use buck2_interpreter::extra::InterpreterHostPlatform;
 use buck2_interpreter::file_loader::LoadedModules;
 use buck2_interpreter::package_imports::ImplicitImport;
-use buck2_interpreter::path::StarlarkModulePath;
+use buck2_interpreter::paths::module::StarlarkModulePath;
 use buck2_interpreter::prelude_path::PreludePath;
 use buck2_node::super_package::SuperPackage;
 use dupe::Dupe;
@@ -177,7 +177,6 @@ impl BuildInterpreterConfiguror {
         package_boundary_exception: bool,
         loaded_modules: &LoadedModules,
         implicit_import: Option<&Arc<ImplicitImport>>,
-        check_within_view: bool,
     ) -> anyhow::Result<ModuleInternals> {
         let record_target_call_stack = self.record_target_call_stack;
         let skip_targets_with_duplicate_names = self.skip_targets_with_duplicate_names;
@@ -212,7 +211,6 @@ impl BuildInterpreterConfiguror {
             package_implicits,
             record_target_call_stack,
             skip_targets_with_duplicate_names,
-            check_within_view,
             package_listing,
             super_package,
         ))

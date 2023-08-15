@@ -37,7 +37,7 @@ mod tests {
     use buck2_execute::digest_config::DigestConfig;
     use buck2_execute::digest_config::SetDigestConfig;
     use buck2_execute::execute::dice_data::set_fallback_executor_config;
-    use buck2_interpreter::path::BxlFilePath;
+    use buck2_interpreter::paths::bxl::BxlFilePath;
     use buck2_util::collections::ordered_map::OrderedMap;
     use dice::testing::DiceBuilder;
     use dice::DiceComputations;
@@ -86,8 +86,11 @@ mod tests {
         );
 
         let mut deferred = DeferredRegistry::new(BaseKey::Base(BaseDeferredKey::BxlLabel(
-            bxl.dupe()
-                .into_base_deferred_key_dyn_impl(ExecutionPlatformResolution::unspecified()),
+            bxl.dupe().into_base_deferred_key_dyn_impl(
+                ExecutionPlatformResolution::unspecified(),
+                Vec::new(),
+                Vec::new(),
+            ),
         )));
 
         let executed0 = Arc::new(AtomicBool::new(false));

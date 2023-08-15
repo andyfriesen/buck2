@@ -61,7 +61,7 @@
 //!             impl Key for ComputeA {
 //!                 type Value = Arc<String>;
 //!
-//!                 async fn compute(&self, ctx: &DiceComputations, _cancellations: &CancellationContext) -> Self::Value {
+//!                 async fn compute(&self, ctx: &mut DiceComputations, _cancellations: &CancellationContext) -> Self::Value {
 //!                     // request for other computations on the self
 //!                     let n = ctx.my_computation().compute_b(self.0).await;
 //!                     Arc::new(self.1.repeat(n))
@@ -89,7 +89,7 @@
 //!     impl Key for ComputeB {
 //!         type Value = usize;
 //!
-//!         async fn compute(&self, ctx: &DiceComputations, _cancellations: &CancellationContext) -> Self::Value {
+//!         async fn compute(&self, ctx: &mut DiceComputations, _cancellations: &CancellationContext) -> Self::Value {
 //!             self.0 + ctx.injected_configs().get_config().await + ctx.global_data().static_data().len()
 //!         }
 //!
@@ -213,6 +213,7 @@ pub mod introspection;
 mod legacy;
 pub(crate) mod metrics;
 mod opaque;
+pub(crate) mod owned;
 pub(crate) mod result;
 mod transaction;
 mod transaction_update;

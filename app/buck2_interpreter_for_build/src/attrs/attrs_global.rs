@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use allocative::Allocative;
 use anyhow::Context as _;
+use buck2_core::plugins::PluginKindSet;
 use buck2_core::provider::label::ProvidersLabel;
 use buck2_interpreter::coerce::COERCE_TARGET_LABEL;
 use buck2_interpreter::types::provider::callable::ValueAsProviderCallableLike;
@@ -25,6 +26,7 @@ use buck2_node::provider_id_set::ProviderIdSet;
 use derive_more::Display;
 use dupe::Dupe;
 use dupe::OptionDupedExt;
+use either::Either;
 use gazebo::prelude::*;
 use starlark::environment::GlobalsBuilder;
 use starlark::environment::Methods;
@@ -42,10 +44,13 @@ use starlark::StarlarkDocs;
 use thiserror::Error;
 use tracing::error;
 
+use crate::attrs::attribute_as_starlark_value::register_attr_type;
 use crate::attrs::attribute_as_starlark_value::AttributeAsStarlarkValue;
 use crate::attrs::coerce::attr_type::AttrTypeExt;
 use crate::attrs::coerce::ctx::BuildAttrCoercionContext;
 use crate::interpreter::build_context::BuildContext;
+use crate::plugins::plugin_kind_from_value;
+use crate::plugins::AllPlugins;
 
 const OPTION_NONE_EXPLANATION: &str = "`None` as an attribute value always picks the default. For `attrs.option`, if the default isn't `None`, there is no way to express `None`.";
 
@@ -60,7 +65,7 @@ enum AttrError {
     DefaultOnlyMustHaveDefault,
 }
 
-pub trait AttributeExt {
+pub(crate) trait AttributeExt {
     /// Helper to create an attribute from attrs.foo functions
     fn attr<'v>(
         eval: &mut Evaluator<'v, '_>,
@@ -307,6 +312,17 @@ fn attr_module(registry: &mut MethodsBuilder) {
         )))
     }
 
+    fn plugin_dep<'v>(
+        #[starlark(this)] _this: Value<'v>,
+        #[starlark(require = named)] kind: Value<'v>,
+        #[starlark(require = named)] default: Option<Value<'v>>,
+        #[starlark(require = named, default = "")] doc: &str,
+        eval: &mut Evaluator<'v, '_>,
+    ) -> anyhow::Result<AttributeAsStarlarkValue> {
+        let kind = plugin_kind_from_value(kind)?;
+        Attribute::attr(eval, default, doc, AttrType::plugin_dep(kind))
+    }
+
     /// Takes a target from the user, as a string, and supplies a dependency to the rule.
     /// A target can be specified as an absolute dependency `foo//bar:baz`, omitting the
     /// cell (`//bar:baz`) or omitting the package name (`:baz`).
@@ -316,13 +332,31 @@ fn attr_module(registry: &mut MethodsBuilder) {
     fn dep<'v>(
         #[starlark(this)] _this: Value<'v>,
         #[starlark(require = named, default = Vec::new())] providers: Vec<Value<'v>>,
+        #[starlark(require = named, default = Vec::new())] pulls_plugins: Vec<Value<'v>>,
+        #[starlark(require = named, default = Either::Left(Vec::new()))]
+        pulls_and_pushes_plugins: Either<Vec<Value<'v>>, &'v AllPlugins>,
         #[starlark(require = named)] default: Option<Value<'v>>,
         #[starlark(require = named, default = "")] doc: &str,
         eval: &mut Evaluator<'v, '_>,
     ) -> anyhow::Result<AttributeAsStarlarkValue> {
         Attribute::check_not_relative_label(default, "attrs.dep")?;
         let required_providers = dep_like_attr_handle_providers_arg(providers)?;
-        let coercer = AttrType::dep(required_providers);
+        let plugin_kinds = match pulls_and_pushes_plugins {
+            Either::Right(_) => PluginKindSet::ALL,
+            Either::Left(pulls_and_pushes_plugins) => {
+                let pulls_and_pushes_plugins: Vec<_> = pulls_and_pushes_plugins
+                    .into_iter()
+                    .map(plugin_kind_from_value)
+                    .collect::<anyhow::Result<_>>()?;
+                let pulls_plugins: Vec<_> = pulls_plugins
+                    .into_iter()
+                    .map(plugin_kind_from_value)
+                    .collect::<anyhow::Result<_>>()?;
+                PluginKindSet::new(pulls_plugins, pulls_and_pushes_plugins)?
+            }
+        };
+
+        let coercer = AttrType::dep(required_providers, plugin_kinds);
         Attribute::attr(eval, default, doc, coercer)
     }
 
@@ -457,7 +491,12 @@ fn attr_module(registry: &mut MethodsBuilder) {
     ) -> anyhow::Result<AttributeAsStarlarkValue> {
         // TODO(nga): explain how this is different from `dep`.
         //   This probably meant to be similar to `label`, but not configurable.
-        Attribute::attr(eval, None, doc, AttrType::dep(ProviderIdSet::EMPTY))
+        Attribute::attr(
+            eval,
+            None,
+            doc,
+            AttrType::dep(ProviderIdSet::EMPTY, PluginKindSet::EMPTY),
+        )
     }
 
     /// Currently an alias for `attrs.string`.
@@ -598,6 +637,7 @@ impl<'v> StarlarkValue<'v> for Attrs {
 
 pub fn register_attrs(globals: &mut GlobalsBuilder) {
     globals.set("attrs", globals.frozen_heap().alloc_simple(Attrs));
+    register_attr_type(globals);
 }
 
 #[cfg(test)]

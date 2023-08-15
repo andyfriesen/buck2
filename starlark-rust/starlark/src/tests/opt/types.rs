@@ -22,14 +22,14 @@ fn test_return_type_erased() {
     // Return type is checked in bytecode.
     // In this example, return type is anything.
     // Check it is not present in bytecode.
-    bc_golden_test("opt_return_type_erased", "def test() -> '_a': return 1");
+    bc_golden_test(
+        "opt_return_type_erased",
+        "def test() -> typing.Any: return 1",
+    );
 }
 
 #[test]
 fn test_return_type_present() {
     // Self-check for previous test.
-    bc_golden_test(
-        "opt_return_type_present",
-        "def test() -> 'string': return 'x'",
-    );
+    bc_golden_test("opt_return_type_present", "def test() -> str: return 'x'");
 }

@@ -5,24 +5,25 @@
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
 # of this source tree.
 
+load("@prelude//android:android_providers.bzl", "AndroidResourceInfo")
 load("@prelude//java:java_library.bzl", "compile_to_jar")
 load("@prelude//java:java_providers.bzl", "JavaClasspathEntry", "JavaLibraryInfo", "derive_compiling_deps")
 load("@prelude//utils:set.bzl", "set")
 
 RDotJavaSourceCode = record(
-    r_dot_java_source_code_dir = "artifact",
-    r_dot_java_source_code_zipped = "artifact",
-    strings_source_code_dir = ["artifact", None],
-    strings_source_code_zipped = ["artifact", None],
-    ids_source_code_dir = ["artifact", None],
-    ids_source_code_zipped = ["artifact", None],
+    r_dot_java_source_code_dir = Artifact,
+    r_dot_java_source_code_zipped = Artifact,
+    strings_source_code_dir = [Artifact, None],
+    strings_source_code_zipped = [Artifact, None],
+    ids_source_code_dir = [Artifact, None],
+    ids_source_code_zipped = [Artifact, None],
 )
 
 def get_dummy_r_dot_java(
         ctx: AnalysisContext,
         merge_android_resources_tool: RunInfo.type,
-        android_resources: list["AndroidResourceInfo"],
-        union_package: [str, None]) -> "JavaLibraryInfo":
+        android_resources: list[AndroidResourceInfo.type],
+        union_package: [str, None]) -> JavaLibraryInfo.type:
     r_dot_java_source_code = _generate_r_dot_java_source_code(ctx, merge_android_resources_tool, android_resources, "dummy_r_dot_java", union_package = union_package)
     library_output = _generate_and_compile_r_dot_java(
         ctx,
@@ -38,14 +39,14 @@ def get_dummy_r_dot_java(
 def generate_r_dot_javas(
         ctx: AnalysisContext,
         merge_android_resources_tool: RunInfo.type,
-        android_resources: list["AndroidResourceInfo"],
+        android_resources: list[AndroidResourceInfo.type],
         banned_duplicate_resource_types: list[str],
-        uber_r_dot_txt_files: list["artifact"],
-        override_symbols_paths: list["artifact"],
-        duplicate_resources_allowlist: ["artifact", None],
+        uber_r_dot_txt_files: list[Artifact],
+        override_symbols_paths: list[Artifact],
+        duplicate_resources_allowlist: [Artifact, None],
         union_package: [str, None],
-        referenced_resources_lists: list["artifact"],
-        generate_strings_and_ids_separately: [bool, None] = True) -> list["JavaLibraryInfo"]:
+        referenced_resources_lists: list[Artifact],
+        generate_strings_and_ids_separately: [bool, None] = True) -> list[JavaLibraryInfo.type]:
     r_dot_java_source_code = _generate_r_dot_java_source_code(
         ctx,
         merge_android_resources_tool,
@@ -92,16 +93,16 @@ def generate_r_dot_javas(
 def _generate_r_dot_java_source_code(
         ctx: AnalysisContext,
         merge_android_resources_tool: RunInfo.type,
-        android_resources: list["AndroidResourceInfo"],
+        android_resources: list[AndroidResourceInfo.type],
         identifier: str,
         force_final_resources_ids = False,
         generate_strings_and_ids_separately = False,
         banned_duplicate_resource_types: list[str] = [],
-        uber_r_dot_txt_files: list["artifact"] = [],
-        override_symbols_paths: list["artifact"] = [],
-        duplicate_resources_allowlist: ["artifact", None] = None,
+        uber_r_dot_txt_files: list[Artifact] = [],
+        override_symbols_paths: list[Artifact] = [],
+        duplicate_resources_allowlist: [Artifact, None] = None,
         union_package: [str, None] = None,
-        referenced_resources_lists: list["artifact"] = []) -> RDotJavaSourceCode.type:
+        referenced_resources_lists: list[Artifact] = []) -> RDotJavaSourceCode.type:
     merge_resources_cmd = cmd_args(merge_android_resources_tool)
 
     r_dot_txt_info = cmd_args()
@@ -175,7 +176,7 @@ def _generate_r_dot_java_source_code(
 
 def _generate_and_compile_r_dot_java(
         ctx: AnalysisContext,
-        r_dot_java_source_code_zipped: "artifact",
+        r_dot_java_source_code_zipped: Artifact,
         identifier: str,
         remove_classes: list[str] = []) -> JavaClasspathEntry.type:
     r_dot_java_out = ctx.actions.declare_output("{}.jar".format(identifier))

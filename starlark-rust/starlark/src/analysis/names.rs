@@ -38,8 +38,9 @@ use crate::analysis::EvalSeverity;
 use crate::codemap::CodeMap;
 use crate::codemap::Span;
 use crate::codemap::Spanned;
-use crate::syntax::ast::AstAssign;
+use crate::syntax::ast::AssignP;
 use crate::syntax::ast::AstAssignIdent;
+use crate::syntax::ast::AstAssignTarget;
 use crate::syntax::ast::AstExpr;
 use crate::syntax::ast::AstIdent;
 use crate::syntax::ast::AstStmt;
@@ -47,6 +48,7 @@ use crate::syntax::ast::AstTypeExpr;
 use crate::syntax::ast::Clause;
 use crate::syntax::ast::Expr;
 use crate::syntax::ast::ForClause;
+use crate::syntax::ast::ForP;
 use crate::syntax::ast::Stmt;
 use crate::syntax::AstModule;
 
@@ -377,7 +379,7 @@ impl<'a> State<'a> {
 
     // Traverse the syntax tree
 
-    fn assign(&mut self, assign: &'a AstAssign) {
+    fn assign(&mut self, assign: &'a AstAssignTarget) {
         assign.visit_expr(|x| self.expr(x));
         assign.visit_lvalue(|x| self.set_ident(x, Kind::Assign))
     }
@@ -447,7 +449,7 @@ impl<'a> State<'a> {
         self.expr(&ty.expr)
     }
 
-    fn assign_as_expr(&mut self, assign: &'a AstAssign) {
+    fn assign_as_expr(&mut self, assign: &'a AstAssignTarget) {
         assign.visit_expr(|x| self.expr(x));
         assign.visit_lvalue(|x| self.use_ident(AstStr::assign_ident(x)));
     }
@@ -464,9 +466,9 @@ impl<'a> State<'a> {
                 self.expr_opt(x.as_ref());
                 self.set_abort(Abort::Function);
             }
-            Stmt::Assign(lhs, type_rhs) => {
-                self.typ_opt(type_rhs.0.as_ref());
-                self.expr(&type_rhs.1);
+            Stmt::Assign(AssignP { lhs, ty, rhs }) => {
+                self.typ_opt(ty.as_ref());
+                self.expr(rhs);
                 self.assign(lhs);
             }
             Stmt::AssignModify(lhs, _, rhs) => {
@@ -487,12 +489,12 @@ impl<'a> State<'a> {
                 self.expr(cond);
                 self.branch(|me| me.stmt(&t_f.0), |me| me.stmt(&t_f.1));
             }
-            Stmt::For(var, iter_body) => {
-                self.expr(&iter_body.0);
+            Stmt::For(ForP { var, over, body }) => {
+                self.expr(over);
                 // Note this isn't 100% correct, as a for loop may set something the next iteration consumes
                 self.loops(|me| {
                     me.assign(var);
-                    me.stmt(&iter_body.1);
+                    me.stmt(body);
                 });
             }
             Stmt::Def(x) => {

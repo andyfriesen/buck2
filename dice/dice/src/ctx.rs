@@ -11,25 +11,28 @@ use std::future::Future;
 use std::sync::Arc;
 
 use allocative::Allocative;
+use dupe::Dupe;
+use futures::future::BoxFuture;
 use futures::FutureExt;
+use gazebo::variants::UnpackVariants;
+use more_futures::owning_future::OwningFuture;
 
+use crate::api::computations::DiceComputations;
 use crate::api::data::DiceData;
 use crate::api::error::DiceResult;
 use crate::api::key::Key;
 use crate::api::opaque::OpaqueValue;
-use crate::api::transaction::DiceTransactionUpdater;
 use crate::api::user_data::UserComputationData;
 use crate::api::user_data::UserCycleDetectorGuard;
-use crate::impls::ctx::PerComputeCtx;
+use crate::impls::ctx::ModernComputeCtx;
 use crate::legacy::ctx::DiceComputationsImplLegacy;
 use crate::opaque::OpaqueValueImpl;
-use crate::transaction_update::DiceTransactionUpdaterImpl;
 use crate::versions::VersionNumber;
 
-#[derive(Allocative)]
+#[derive(Allocative, UnpackVariants)]
 pub(crate) enum DiceComputationsImpl {
     Legacy(Arc<DiceComputationsImplLegacy>),
-    Modern(PerComputeCtx),
+    Modern(ModernComputeCtx),
 }
 
 impl DiceComputationsImpl {
@@ -75,6 +78,60 @@ impl DiceComputationsImpl {
         }
     }
 
+    /// Computes all the given tasks in parallel, returning an unordered Stream
+    pub(crate) fn compute_many<'a, T: 'a>(
+        &'a self,
+        computes: impl IntoIterator<
+            Item = impl for<'x> FnOnce(&'x mut DiceComputations) -> BoxFuture<'x, T> + Send,
+        >,
+    ) -> Vec<impl Future<Output = T> + 'a> {
+        match self {
+            DiceComputationsImpl::Legacy(ctx) => {
+                // legacy dice does nothing special
+                computes
+                    .into_iter()
+                    .map(|work| {
+                        OwningFuture::new(
+                            DiceComputations(DiceComputationsImpl::Legacy(ctx.dupe())),
+                            work,
+                        )
+                        .left_future()
+                    })
+                    .collect()
+            }
+            DiceComputationsImpl::Modern(ctx) => ctx.compute_many(computes),
+        }
+    }
+
+    pub(crate) fn compute2<'a, T: 'a, U: 'a>(
+        &'a self,
+        compute1: impl for<'x> FnOnce(&'x mut DiceComputations) -> BoxFuture<'x, T> + Send,
+        compute2: impl for<'x> FnOnce(&'x mut DiceComputations) -> BoxFuture<'x, U> + Send,
+    ) -> (impl Future<Output = T> + 'a, impl Future<Output = U> + 'a) {
+        match self {
+            DiceComputationsImpl::Legacy(ctx) => {
+                // legacy dice does nothing special
+                (
+                    OwningFuture::new(
+                        DiceComputations(DiceComputationsImpl::Legacy(ctx.dupe())),
+                        compute1,
+                    )
+                    .left_future(),
+                    OwningFuture::new(
+                        DiceComputations(DiceComputationsImpl::Legacy(ctx.dupe())),
+                        compute2,
+                    )
+                    .left_future(),
+                )
+            }
+            DiceComputationsImpl::Modern(ctx) => {
+                let (f1, f2) = ctx.compute2(compute1, compute2);
+
+                (f1.right_future(), f2.right_future())
+            }
+        }
+    }
+
     /// Data that is static per the entire lifetime of Dice. These data are initialized at the
     /// time that Dice is initialized via the constructor.
     pub(crate) fn global_data(&self) -> &DiceData {
@@ -114,14 +171,5 @@ impl DiceComputationsImpl {
             DiceComputationsImpl::Legacy(delegate) => delegate.get_version(),
             DiceComputationsImpl::Modern(delegate) => delegate.get_version(),
         }
-    }
-
-    pub(crate) fn into_updater(self) -> DiceTransactionUpdater {
-        DiceTransactionUpdater(match self {
-            DiceComputationsImpl::Legacy(delegate) => DiceTransactionUpdaterImpl::Legacy(delegate),
-            DiceComputationsImpl::Modern(delegate) => {
-                DiceTransactionUpdaterImpl::Modern(delegate.into_updater())
-            }
-        })
     }
 }

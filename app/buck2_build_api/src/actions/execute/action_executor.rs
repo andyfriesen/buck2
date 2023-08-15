@@ -17,8 +17,8 @@ use async_trait::async_trait;
 use buck2_artifact::artifact::build_artifact::BuildArtifact;
 use buck2_common::dice::data::HasIoProvider;
 use buck2_common::events::HasEvents;
-use buck2_common::http::counting_client::CountingHttpClient;
 use buck2_common::http::HasHttpClient;
+use buck2_common::http::HttpClient;
 use buck2_common::io::IoProvider;
 use buck2_common::liveliness_observer::NoopLivelinessObserver;
 use buck2_core::execution_types::executor_config::CommandExecutorConfig;
@@ -33,6 +33,7 @@ use buck2_execute::execute::action_digest::ActionDigest;
 use buck2_execute::execute::blocking::BlockingExecutor;
 use buck2_execute::execute::blocking::HasBlockingExecutor;
 use buck2_execute::execute::cache_uploader::CacheUploadInfo;
+use buck2_execute::execute::cache_uploader::CacheUploadResult;
 use buck2_execute::execute::cache_uploader::DepFileEntry;
 use buck2_execute::execute::claim::MutexClaimManager;
 use buck2_execute::execute::clean_output_paths::CleanOutputPaths;
@@ -121,14 +122,14 @@ pub enum ActionExecutionKind {
         requires_local: bool,
         allows_cache_upload: bool,
         did_cache_upload: bool,
+        allows_dep_file_cache_upload: bool,
+        did_dep_file_cache_upload: bool,
         eligible_for_full_hybrid: bool,
+        dep_file_key: Option<String>,
     },
     /// This action is simple and executed inline within buck2 (e.g. write, symlink_dir)
     #[display(fmt = "simple")]
     Simple,
-    /// This action was not executed at all.
-    #[display(fmt = "skipped")]
-    Skipped,
     /// This action logically executed, but didn't do all the work.
     #[display(fmt = "deferred")]
     Deferred,
@@ -143,7 +144,10 @@ pub struct CommandExecutionRef<'a> {
     pub requires_local: bool,
     pub allows_cache_upload: bool,
     pub did_cache_upload: bool,
+    pub allows_dep_file_cache_upload: bool,
+    pub did_dep_file_cache_upload: bool,
     pub eligible_for_full_hybrid: bool,
+    pub dep_file_key: &'a Option<String>,
 }
 
 impl ActionExecutionKind {
@@ -151,7 +155,6 @@ impl ActionExecutionKind {
         match self {
             ActionExecutionKind::Command { kind, .. } => kind.as_enum(),
             ActionExecutionKind::Simple => buck2_data::ActionExecutionKind::Simple,
-            ActionExecutionKind::Skipped => buck2_data::ActionExecutionKind::Skipped,
             ActionExecutionKind::Deferred => buck2_data::ActionExecutionKind::Deferred,
             ActionExecutionKind::LocalDepFile => buck2_data::ActionExecutionKind::LocalDepFile,
         }
@@ -165,6 +168,9 @@ impl ActionExecutionKind {
                 requires_local,
                 allows_cache_upload,
                 did_cache_upload,
+                allows_dep_file_cache_upload,
+                did_dep_file_cache_upload,
+                dep_file_key,
                 eligible_for_full_hybrid,
             } => Some(CommandExecutionRef {
                 kind,
@@ -172,9 +178,12 @@ impl ActionExecutionKind {
                 requires_local: *requires_local,
                 allows_cache_upload: *allows_cache_upload,
                 did_cache_upload: *did_cache_upload,
+                allows_dep_file_cache_upload: *allows_dep_file_cache_upload,
+                did_dep_file_cache_upload: *did_dep_file_cache_upload,
+                dep_file_key,
                 eligible_for_full_hybrid: *eligible_for_full_hybrid,
             }),
-            Self::Simple | Self::Skipped | Self::Deferred | Self::LocalDepFile => None,
+            Self::Simple | Self::Deferred | Self::LocalDepFile => None,
         }
     }
 }
@@ -279,7 +288,7 @@ pub struct BuckActionExecutor {
     digest_config: DigestConfig,
     run_action_knobs: RunActionKnobs,
     io_provider: Arc<dyn IoProvider>,
-    http_client: CountingHttpClient,
+    http_client: HttpClient,
     mergebase: Mergebase,
 }
 
@@ -293,7 +302,7 @@ impl BuckActionExecutor {
         digest_config: DigestConfig,
         run_action_knobs: RunActionKnobs,
         io_provider: Arc<dyn IoProvider>,
-        http_client: CountingHttpClient,
+        http_client: HttpClient,
         mergebase: Mergebase,
     ) -> Self {
         Self {
@@ -414,12 +423,15 @@ impl ActionExecutionCtx for BuckActionExecutionContext<'_> {
         request: &CommandExecutionRequest,
         result: CommandExecutionResult,
         allows_cache_upload: bool,
+        allows_dep_file_cache_upload: bool,
     ) -> anyhow::Result<(ActionOutputs, ActionExecutionMetadata)> {
         let CommandExecutionResult {
             outputs,
             report,
             rejected_execution,
             did_cache_upload,
+            did_dep_file_cache_upload,
+            dep_file_key,
             eligible_for_full_hybrid,
         } = result;
         // TODO (@torozco): The execution kind should be made to come via the command reports too.
@@ -442,6 +454,9 @@ impl ActionExecutionCtx for BuckActionExecutionContext<'_> {
                             requires_local: request.executor_preference().requires_local(),
                             allows_cache_upload,
                             did_cache_upload,
+                            allows_dep_file_cache_upload,
+                            did_dep_file_cache_upload,
+                            dep_file_key,
                             eligible_for_full_hybrid,
                         },
                         timing: report.timing.into(),
@@ -483,7 +498,7 @@ impl ActionExecutionCtx for BuckActionExecutionContext<'_> {
         action_digest: ActionDigest,
         execution_result: &CommandExecutionResult,
         dep_file_entry: Option<DepFileEntry>,
-    ) -> anyhow::Result<bool> {
+    ) -> anyhow::Result<CacheUploadResult> {
         let action = self.target();
         self.executor
             .command_executor
@@ -544,7 +559,7 @@ impl ActionExecutionCtx for BuckActionExecutionContext<'_> {
         self.executor.io_provider.dupe()
     }
 
-    fn http_client(&self) -> CountingHttpClient {
+    fn http_client(&self) -> HttpClient {
         self.executor.http_client.dupe()
     }
 }
@@ -663,8 +678,7 @@ mod tests {
     use buck2_artifact::deferred::id::DeferredId;
     use buck2_artifact::deferred::key::DeferredKey;
     use buck2_common::cas_digest::CasDigestConfig;
-    use buck2_common::http::counting_client::CountingHttpClient;
-    use buck2_common::http::ClientForTest;
+    use buck2_common::http::HttpClientBuilder;
     use buck2_common::io::fs::FsIoProvider;
     use buck2_core::base_deferred_key::BaseDeferredKey;
     use buck2_core::buck_path::path::BuckPath;
@@ -771,7 +785,9 @@ mod tests {
                 project_fs,
                 CasDigestConfig::testing_default(),
             )),
-            CountingHttpClient::new(Arc::new(ClientForTest {})),
+            HttpClientBuilder::https_with_system_roots()
+                .unwrap()
+                .build(),
             Default::default(),
         );
 
@@ -860,7 +876,7 @@ mod tests {
                     ctx.fs().fs().write_file(&dest_path, "", false)?
                 }
 
-                ctx.unpack_command_execution_result(&req, res, false)?;
+                ctx.unpack_command_execution_result(&req, res, false, false)?;
                 let outputs = self
                     .outputs
                     .iter()

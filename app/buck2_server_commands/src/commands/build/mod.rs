@@ -141,11 +141,20 @@ async fn build(
 
     let client_ctx = request.client_context()?;
     let global_target_platform =
-        target_platform_from_client_context(client_ctx, server_ctx, &ctx).await?;
+        target_platform_from_client_context(client_ctx, server_ctx, &mut ctx).await?;
 
     let should_create_unhashed_links = ctx
         .parse_legacy_config_property(cell_resolver.root_cell(), "buck2", "create_unhashed_links")
         .await?;
+
+    let want_configured_graph_size = ctx
+        .parse_legacy_config_property(
+            cell_resolver.root_cell(),
+            "buck2",
+            "log_configured_graph_size",
+        )
+        .await?
+        .unwrap_or_default();
 
     let parsed_patterns: Vec<ParsedPattern<ConfiguredProvidersPatternExtra>> =
         parse_patterns_from_cli_args(&mut ctx, &request.target_patterns, cwd).await?;
@@ -241,6 +250,7 @@ async fn build(
         build_opts.fail_fast,
         MissingTargetBehavior::from_skip(build_opts.skip_missing_targets),
         build_opts.skip_incompatible_targets,
+        want_configured_graph_size,
     )
     .await?
     {
@@ -322,6 +332,7 @@ async fn build_targets(
     fail_fast: bool,
     missing_target_behavior: MissingTargetBehavior,
     skip_incompatible_targets: bool,
+    want_configured_graph_size: bool,
 ) -> anyhow::Result<BTreeMap<ConfiguredProvidersLabel, BuildTargetResult>> {
     let stream = match target_resolution_config {
         TargetResolutionConfig::Default(global_target_platform) => {
@@ -336,6 +347,7 @@ async fn build_targets(
                 materialization_context,
                 missing_target_behavior,
                 skip_incompatible_targets,
+                want_configured_graph_size,
             )
             .left_stream()
         }
@@ -345,6 +357,7 @@ async fn build_targets(
             universe,
             build_providers,
             materialization_context,
+            want_configured_graph_size,
         )
         .right_stream(),
     };
@@ -365,6 +378,7 @@ fn build_targets_in_universe<'a>(
     universe: CqueryUniverse,
     build_providers: Arc<BuildProviders>,
     materialization_context: &'a MaterializationContext,
+    want_configured_graph_size: bool,
 ) -> impl Stream<Item = anyhow::Result<BuildEvent>> + Unpin + 'a {
     let providers_to_build = build_providers_to_providers_to_build(&build_providers);
     let provider_labels = universe.get_provider_labels(&spec);
@@ -379,7 +393,10 @@ fn build_targets_in_universe<'a>(
                     &materialization_context,
                     p,
                     &providers_to_build,
-                    false,
+                    build::BuildConfiguredLabelOptions {
+                        skippable: false,
+                        want_configured_graph_size,
+                    },
                 )
                 .await;
 
@@ -402,6 +419,7 @@ fn build_targets_with_global_target_platform<'a>(
     materialization_context: &'a MaterializationContext,
     missing_target_behavior: MissingTargetBehavior,
     skip_incompatible_targets: bool,
+    want_configured_graph_size: bool,
 ) -> impl Stream<Item = anyhow::Result<BuildEvent>> + Unpin + 'a {
     spec.specs
         .into_iter()
@@ -419,6 +437,7 @@ fn build_targets_with_global_target_platform<'a>(
                     materialization_context,
                     missing_target_behavior,
                     skip_incompatible_targets,
+                    want_configured_graph_size,
                 ))
             }
         })
@@ -438,6 +457,7 @@ struct TargetBuildSpec {
     // of something like `//foo/...` we can skip it (for example if it's incompatible with
     // the target platform).
     skippable: bool,
+    want_configured_graph_size: bool,
 }
 
 fn build_providers_to_providers_to_build(build_providers: &BuildProviders) -> ProvidersToBuild {
@@ -468,6 +488,7 @@ fn build_targets_for_spec<'a>(
     materialization_context: &'a MaterializationContext,
     missing_target_behavior: MissingTargetBehavior,
     skip_incompatible_targets: bool,
+    want_configured_graph_size: bool,
 ) -> impl Stream<Item = anyhow::Result<BuildEvent>> + Unpin + 'a {
     async move {
         let skippable = match spec {
@@ -495,6 +516,7 @@ fn build_targets_for_spec<'a>(
                 providers: extra.providers,
                 global_target_platform: global_target_platform.dupe(),
                 skippable,
+                want_configured_graph_size,
             })
             .collect();
 
@@ -544,7 +566,10 @@ async fn build_target<'a>(
             materialization_context,
             providers_label,
             providers_to_build,
-            spec.skippable,
+            build::BuildConfiguredLabelOptions {
+                skippable: spec.skippable,
+                want_configured_graph_size: spec.want_configured_graph_size,
+            },
         )
         .await
     }

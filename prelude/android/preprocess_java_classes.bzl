@@ -10,13 +10,13 @@ load("@prelude//java:java_toolchain.bzl", "JavaToolchainInfo")
 load("@prelude//java/utils:java_utils.bzl", "get_path_separator")
 load("@prelude//utils:utils.bzl", "expect")
 
-def get_preprocessed_java_classes(ctx: AnalysisContext, input_jars = {"artifact": "target_label"}) -> dict["artifact", "target_label"]:
+def get_preprocessed_java_classes(ctx: AnalysisContext, input_jars = {"artifact": "target_label"}) -> dict[Artifact, "target_label"]:
     if not input_jars:
         return {}
 
     sh_script, _ = ctx.actions.write(
         "preprocessed_java_classes/script.sh",
-        cmd_args(ctx.attrs.preprocess_java_classes_bash),
+        cmd_args(["mkdir -p $OUT_JARS_DIR"]).add(ctx.attrs.preprocess_java_classes_bash),
         is_executable = True,
         allow_args = True,
     )
@@ -57,7 +57,7 @@ def get_preprocessed_java_classes(ctx: AnalysisContext, input_jars = {"artifact"
         jar_name = unscrubbed_output_jar.basename
         output_jar = ctx.actions.declare_output("preprocessed_java_classes/output_dir/{}".format(jar_name))
         scrub_cmd = cmd_args(zip_scrubber, unscrubbed_output_jar, output_jar.as_output())
-        ctx.actions.run(scrub_cmd, category = "scrub_preprocessed_java_class", identifier = jar_name)
+        ctx.actions.run(scrub_cmd, category = "scrub_preprocessed_java_class", identifier = jar_name, local_only = True)
         output_jars_to_owners[output_jar] = target_label
 
     return output_jars_to_owners

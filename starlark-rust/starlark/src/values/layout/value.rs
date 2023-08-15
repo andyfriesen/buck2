@@ -65,6 +65,8 @@ use crate::eval::Evaluator;
 use crate::eval::ParametersSpec;
 use crate::sealed::Sealed;
 use crate::typing::Ty;
+use crate::values::bool::VALUE_FALSE;
+use crate::values::bool::VALUE_TRUE;
 use crate::values::demand::request_value_impl;
 use crate::values::dict::FrozenDictRef;
 use crate::values::enumeration::EnumType;
@@ -76,10 +78,6 @@ use crate::values::int::PointerI32;
 use crate::values::iter::StarlarkIterator;
 use crate::values::layout::avalue::AValue;
 use crate::values::layout::avalue::StarlarkStrAValue;
-use crate::values::layout::avalue::VALUE_EMPTY_TUPLE;
-use crate::values::layout::avalue::VALUE_FALSE;
-use crate::values::layout::avalue::VALUE_NONE;
-use crate::values::layout::avalue::VALUE_TRUE;
 use crate::values::layout::heap::repr::AValueHeader;
 use crate::values::layout::heap::repr::AValueRepr;
 use crate::values::layout::pointer::FrozenPointer;
@@ -90,6 +88,7 @@ use crate::values::layout::typed::string::StringValueLike;
 use crate::values::layout::vtable::AValueDyn;
 use crate::values::layout::vtable::AValueDynFull;
 use crate::values::layout::vtable::AValueVTable;
+use crate::values::none::none_type::VALUE_NONE;
 use crate::values::num::value::NumRef;
 use crate::values::range::Range;
 use crate::values::record::instance::FrozenRecord;
@@ -97,8 +96,10 @@ use crate::values::record::record_type::RecordType;
 use crate::values::recursive_repr_or_json_guard::json_stack_push;
 use crate::values::recursive_repr_or_json_guard::repr_stack_push;
 use crate::values::stack_guard;
+use crate::values::starlark_type_id::StarlarkTypeId;
 use crate::values::string::StarlarkStr;
 use crate::values::structs::value::FrozenStruct;
+use crate::values::tuple::value::VALUE_EMPTY_TUPLE;
 use crate::values::type_repr::StarlarkTypeRepr;
 use crate::values::types::inline_int::InlineInt;
 use crate::values::types::int_or_big::StarlarkIntRef;
@@ -668,6 +669,12 @@ impl<'v> Value<'v> {
     /// `type(x)`.
     pub fn get_type_value(self) -> FrozenStringValue {
         self.vtable().type_value()
+    }
+
+    /// See documentation of [`StarlarkTypeId`].
+    #[inline]
+    pub(crate) fn starlark_type_id(self) -> StarlarkTypeId {
+        self.vtable().starlark_type_id
     }
 
     /// The literal string that a user would need to use this in type annotations.

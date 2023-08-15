@@ -6,6 +6,7 @@
 # of this source tree.
 
 load("@prelude//:paths.bzl", "paths")
+load("@prelude//cxx:cxx_toolchain_types.bzl", "CxxToolchainInfo")
 load(
     "@prelude//linking:link_info.bzl",
     "LinkInfo",
@@ -43,10 +44,10 @@ CxxExtensionLinkInfo = provider(
 )
 
 def merge_cxx_extension_info(
-        actions: "actions",
+        actions: AnalysisActions,
         deps: list[Dependency],
         linkable_providers: [LinkableProviders.type, None] = None,
-        artifacts: dict[str, "_a"] = {},
+        artifacts: dict[str, typing.Any] = {},
         python_module_names: dict[str, str] = {},
         unembeddable_extensions: dict[str, LinkableProviders.type] = {},
         shared_deps: list[Dependency] = []) -> CxxExtensionLinkInfo.type:
@@ -97,10 +98,10 @@ def merge_cxx_extension_info(
 def rewrite_static_symbols(
         ctx: AnalysisContext,
         suffix: str,
-        pic_objects: list["artifact"],
-        non_pic_objects: list["artifact"],
+        pic_objects: list[Artifact],
+        non_pic_objects: list[Artifact],
         libraries: dict[LinkStyle.type, LinkInfos.type],
-        cxx_toolchain: "CxxToolchainInfo",
+        cxx_toolchain: CxxToolchainInfo.type,
         suffix_all: bool = False) -> dict[LinkStyle.type, LinkInfos.type]:
     symbols_file = _write_syms_file(
         ctx = ctx,
@@ -166,10 +167,10 @@ def rewrite_static_symbols(
 def _write_syms_file(
         ctx: AnalysisContext,
         name: str,
-        objects: list["artifact"],
+        objects: list[Artifact],
         suffix: str,
-        cxx_toolchain: "CxxToolchainInfo",
-        suffix_all: bool = False) -> "artifact":
+        cxx_toolchain: CxxToolchainInfo.type,
+        suffix_all: bool = False) -> Artifact:
     """
     Take a list of objects and append a suffix to all  defined symbols.
     """
@@ -228,9 +229,9 @@ def _write_syms_file(
 def suffix_symbols(
         ctx: AnalysisContext,
         suffix: str,
-        objects: list["artifact"],
-        symbols_file: "artifact",
-        cxx_toolchain: "CxxToolchainInfo") -> (ObjectsLinkable.type, ObjectsLinkable.type):
+        objects: list[Artifact],
+        symbols_file: Artifact,
+        cxx_toolchain: CxxToolchainInfo.type) -> (ObjectsLinkable.type, ObjectsLinkable.type):
     """
     Take a list of objects and append a suffix to all  defined symbols.
     """

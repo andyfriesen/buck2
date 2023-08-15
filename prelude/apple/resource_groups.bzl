@@ -34,11 +34,11 @@ ResourceGroupInfo = provider(fields = [
 ResourceGraphNode = record(
     label = field(Label),
     # Attribute labels on the target.
-    labels = field([str], []),
+    labels = field(list[str], []),
     # Deps of this target which might have resources transitively.
-    deps = field([Label], []),
+    deps = field(list[Label], []),
     # Exported deps of this target which might have resources transitively.
-    exported_deps = field([Label], []),
+    exported_deps = field(list[Label], []),
     # Actual resource data, present when node corresponds to `apple_resource` target.
     resource_spec = field([AppleResourceSpec.type, None], None),
     # Actual asset catalog data, present when node corresponds to `apple_asset_catalog` target.
@@ -132,7 +132,7 @@ def get_resource_group_info(ctx: AnalysisContext) -> [ResourceGroupInfo.type, No
     if not resource_group_map:
         return None
 
-    if type(resource_group_map) == "dependency":
+    if isinstance(resource_group_map, Dependency):
         return resource_group_map[ResourceGroupInfo]
 
     fail("Resource group maps must be provided as a resource_group_map rule dependency.")

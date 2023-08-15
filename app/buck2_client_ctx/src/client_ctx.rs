@@ -24,6 +24,7 @@ use tokio::runtime::Runtime;
 
 use crate::argv::Argv;
 use crate::cleanup_ctx::AsyncCleanupContext;
+use crate::client_metadata::ClientMetadata;
 use crate::common::CommonDaemonCommandOptions;
 use crate::common::HostArchOverride;
 use crate::common::HostPlatformOverride;
@@ -53,6 +54,8 @@ pub struct ClientCommandContext<'a> {
     pub restarter: &'a mut Restarter,
     pub restarted_trace_id: Option<TraceId>,
     pub runtime: &'a Runtime,
+    pub oncall: Option<String>,
+    pub client_metadata: Vec<ClientMetadata>,
 }
 
 impl<'a> ClientCommandContext<'a> {
@@ -131,8 +134,8 @@ impl<'a> ClientCommandContext<'a> {
             }
             .into(),
             host_xcode_version: config_opts.host_xcode_version_override(),
-            oncall: config_opts.oncall.as_ref().cloned().unwrap_or_default(),
             disable_starlark_types: config_opts.disable_starlark_types,
+            unstable_typecheck: config_opts.unstable_typecheck,
             skip_targets_with_duplicate_names: config_opts.skip_targets_with_duplicate_names,
             reuse_current_config: config_opts.reuse_current_config,
             sanitized_argv: cmd.sanitize_argv(self.argv.clone()).argv,
@@ -171,8 +174,9 @@ impl<'a> ClientCommandContext<'a> {
             host_platform: Default::default(),
             host_arch: Default::default(),
             host_xcode_version: Default::default(),
-            oncall: Default::default(),
+            oncall: self.oncall.clone().unwrap_or_default(), // TODO: Why do we not make this optional?
             disable_starlark_types: false,
+            unstable_typecheck: false,
             target_call_stacks: false,
             skip_targets_with_duplicate_names: false,
             trace_id: format!("{}", self.trace_id),

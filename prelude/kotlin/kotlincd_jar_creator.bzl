@@ -11,7 +11,7 @@ load(
     "make_compile_outputs",
 )
 load("@prelude//java:java_resources.bzl", "get_resources_map")
-load("@prelude//java:java_toolchain.bzl", "AbiGenerationMode", "DepFiles")
+load("@prelude//java:java_toolchain.bzl", "AbiGenerationMode", "DepFiles", "JavaToolchainInfo")
 load(
     "@prelude//jvm:cd_jar_creator_util.bzl",
     "OutputPaths",
@@ -28,6 +28,7 @@ load(
     "prepare_final_jar",
     "setup_dep_files",
 )
+load("@prelude//kotlin:kotlin_toolchain.bzl", "KotlinToolchainInfo")
 load("@prelude//kotlin:kotlin_utils.bzl", "get_kotlinc_compatible_target")
 load("@prelude//utils:utils.bzl", "expect", "map_idx")
 
@@ -37,18 +38,18 @@ buckPaths = struct(
 )
 
 def create_jar_artifact_kotlincd(
-        actions: "actions",
+        actions: AnalysisActions,
         actions_identifier: [str, None],
         abi_generation_mode: [AbiGenerationMode.type, None],
-        java_toolchain: "JavaToolchainInfo",
-        kotlin_toolchain: "KotlinToolchainInfo",
-        javac_tool: [str, "RunInfo", "artifact", None],
+        java_toolchain: JavaToolchainInfo.type,
+        kotlin_toolchain: KotlinToolchainInfo.type,
+        javac_tool: [str, RunInfo.type, Artifact, None],
         label: Label,
-        srcs: list["artifact"],
+        srcs: list[Artifact],
         remove_classes: list[str],
-        resources: list["artifact"],
+        resources: list[Artifact],
         resources_root: [str, None],
-        ap_params: list["AnnotationProcessorParams"],
+        annotation_processor_properties: "AnnotationProcessorProperties",
         plugin_params: ["PluginParams", None],
         source_level: int,
         target_level: int,
@@ -56,8 +57,8 @@ def create_jar_artifact_kotlincd(
         required_for_source_only_abi: bool,
         source_only_abi_deps: list[Dependency],
         extra_arguments: list[str],
-        additional_classpath_entries: list["artifact"],
-        bootclasspath_entries: list["artifact"],
+        additional_classpath_entries: list[Artifact],
+        bootclasspath_entries: list[Artifact],
         is_building_android_binary: bool,
         friend_paths: list[Dependency],
         kotlin_compiler_plugins: dict,
@@ -126,7 +127,7 @@ def create_jar_artifact_kotlincd(
 
     def encode_library_command(
             output_paths: OutputPaths.type,
-            path_to_class_hashes: "artifact",
+            path_to_class_hashes: Artifact,
             classpath_jars_tag: "artifact_tag") -> struct.type:
         target_type = TargetType("library")
         base_jar_command = encode_base_jar_command(
@@ -143,7 +144,7 @@ def create_jar_artifact_kotlincd(
             actual_abi_generation_mode,
             srcs,
             resources_map,
-            ap_params = ap_params,
+            annotation_processor_properties = annotation_processor_properties,
             plugin_params = plugin_params,
             extra_arguments = cmd_args(extra_arguments),
             source_only_abi_compiling_deps = [],
@@ -186,7 +187,7 @@ def create_jar_artifact_kotlincd(
             actual_abi_generation_mode,
             srcs,
             resources_map,
-            ap_params,
+            annotation_processor_properties,
             plugin_params,
             cmd_args(extra_arguments),
             source_only_abi_compiling_deps = source_only_abi_compiling_deps,
@@ -215,9 +216,9 @@ def create_jar_artifact_kotlincd(
             qualified_name: str,
             output_paths: OutputPaths.type,
             classpath_jars_tag: "artifact_tag",
-            abi_dir: ["artifact", None],
+            abi_dir: [Artifact, None],
             target_type: TargetType.type,
-            path_to_class_hashes: ["artifact", None],
+            path_to_class_hashes: [Artifact, None],
             source_only_abi_compiling_deps: list["JavaClasspathEntry"] = []):
         _unused = source_only_abi_compiling_deps
 
@@ -300,7 +301,7 @@ def create_jar_artifact_kotlincd(
             exe = exe,
             local_only = local_only,
             low_pass_filter = False,
-            weight = 5,
+            weight = 2,
         )
 
     library_classpath_jars_tag = actions.artifact_tag()

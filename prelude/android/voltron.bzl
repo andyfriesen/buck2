@@ -40,7 +40,7 @@ load("@prelude//utils:utils.bzl", "expect", "flatten")
 #
 # There is also an `android_app_modularity` rule that just prints out details of the Voltron
 # module graph and is used for any subsequent verification.
-def android_app_modularity_impl(ctx: AnalysisContext) -> list["provider"]:
+def android_app_modularity_impl(ctx: AnalysisContext) -> list[Provider]:
     if ctx.attrs._build_only_native_code:
         return [
             # Add an unused default output in case this target is used as an attr.source() anywhere.
@@ -78,7 +78,7 @@ def android_app_modularity_impl(ctx: AnalysisContext) -> list["provider"]:
         ]).hidden(targets_to_jars_args)
 
     if ctx.attrs.should_include_libraries:
-        targets_to_so_names_args = [cmd_args([str(shared_lib.label.raw_target()), so_name, str(shared_lib.can_be_asset)], delimiter = " ") for so_name, shared_lib in traversed_shared_library_info.items()]
+        targets_to_so_names_args = [cmd_args([str(shared_lib.label.raw_target()), so_name], delimiter = " ") for so_name, shared_lib in traversed_shared_library_info.items()]
         targets_to_so_names = ctx.actions.write("targets_to_so_names.txt", targets_to_so_names_args)
         cmd.add([
             "--targets-to-so-names",
@@ -101,7 +101,7 @@ def android_app_modularity_impl(ctx: AnalysisContext) -> list["provider"]:
 
     return [DefaultInfo(default_output = output)]
 
-def get_target_to_module_mapping(ctx: AnalysisContext, deps_by_platform: dict[str, list[Dependency]]) -> ["artifact", None]:
+def get_target_to_module_mapping(ctx: AnalysisContext, deps_by_platform: dict[str, list[Dependency]]) -> [Artifact, None]:
     if not ctx.attrs.application_module_configs:
         return None
 
@@ -133,14 +133,14 @@ def get_target_to_module_mapping(ctx: AnalysisContext, deps_by_platform: dict[st
     return output
 
 def _get_base_cmd_and_output(
-        actions: "actions",
+        actions: AnalysisActions,
         label: Label,
-        android_packageable_infos: list["AndroidPackageableInfo"],
+        android_packageable_infos: list[AndroidPackageableInfo.type],
         shared_libraries: list["SharedLibrary"],
-        android_toolchain: "AndroidToolchainInfo",
+        android_toolchain: AndroidToolchainInfo.type,
         application_module_configs: dict[str, list[Dependency]],
         application_module_dependencies: [dict[str, list[str]], None],
-        application_module_blocklist: [list[list[Dependency]], None]) -> (cmd_args, "artifact"):
+        application_module_blocklist: [list[list[Dependency]], None]) -> (cmd_args, Artifact):
     deps_map = {}
     for android_packageable_info in android_packageable_infos:
         if android_packageable_info.deps:
@@ -201,10 +201,10 @@ def all_targets_in_root_module(_module: str) -> str:
     return ROOT_MODULE
 
 APKModuleGraphInfo = record(
-    module_list = [str],
-    target_to_module_mapping_function = "function",
-    module_to_canary_class_name_function = "function",
-    module_to_module_deps_function = "function",
+    module_list = list[str],
+    target_to_module_mapping_function = typing.Callable,
+    module_to_canary_class_name_function = typing.Callable,
+    module_to_module_deps_function = typing.Callable,
 )
 
 def get_root_module_only_apk_module_graph_info() -> APKModuleGraphInfo.type:
@@ -225,7 +225,7 @@ def get_root_module_only_apk_module_graph_info() -> APKModuleGraphInfo.type:
 
 def get_apk_module_graph_info(
         ctx: AnalysisContext,
-        apk_module_graph_file: "artifact",
+        apk_module_graph_file: Artifact,
         artifacts) -> APKModuleGraphInfo.type:
     apk_module_graph_lines = artifacts[apk_module_graph_file].read_string().split("\n")
     module_count = int(apk_module_graph_lines[0])

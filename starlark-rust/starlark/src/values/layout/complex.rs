@@ -15,8 +15,10 @@
  * limitations under the License.
  */
 
+use std::fmt;
 use std::marker::PhantomData;
 
+use allocative::Allocative;
 use dupe::Clone_;
 use dupe::Copy_;
 use dupe::Dupe_;
@@ -27,22 +29,39 @@ use crate::values::type_repr::StarlarkTypeRepr;
 use crate::values::AllocValue;
 use crate::values::ComplexValue;
 use crate::values::StarlarkValue;
+use crate::values::Trace;
+use crate::values::Tracer;
 use crate::values::UnpackValue;
 use crate::values::Value;
 use crate::values::ValueLike;
+use crate::values::ValueTyped;
 
 /// Value which is either a complex mutable value or a frozen value.
-#[derive(Copy_, Clone_, Dupe_)]
-pub struct ValueOfComplex<'v, T>(Value<'v>, PhantomData<T>)
+#[derive(Copy_, Clone_, Dupe_, Allocative)]
+#[allocative(skip)] // Heap owns the value.
+pub struct ValueTypedComplex<'v, T>(Value<'v>, PhantomData<T>)
 where
     T: ComplexValue<'v>,
     T::Frozen: StarlarkValue<'static>;
 
-impl<'v, T> ValueOfComplex<'v, T>
+impl<'v, T> ValueTypedComplex<'v, T>
 where
     T: ComplexValue<'v>,
     T::Frozen: StarlarkValue<'static>,
 {
+    /// Downcast
+    pub fn new(value: Value<'v>) -> Option<Self> {
+        if value.downcast_ref::<T>().is_some()
+            || unsafe { value.cast_lifetime() }
+                .downcast_ref::<T::Frozen>()
+                .is_some()
+        {
+            Some(ValueTypedComplex(value, PhantomData))
+        } else {
+            None
+        }
+    }
+
     /// Get the value back.
     #[inline]
     pub fn to_value(self) -> Value<'v> {
@@ -64,7 +83,7 @@ where
     }
 }
 
-impl<'v, T> StarlarkTypeRepr for ValueOfComplex<'v, T>
+impl<'v, T> StarlarkTypeRepr for ValueTypedComplex<'v, T>
 where
     T: ComplexValue<'v>,
     T::Frozen: StarlarkValue<'static>,
@@ -74,7 +93,7 @@ where
     }
 }
 
-impl<'v, T> AllocValue<'v> for ValueOfComplex<'v, T>
+impl<'v, T> AllocValue<'v> for ValueTypedComplex<'v, T>
 where
     T: ComplexValue<'v>,
     T::Frozen: StarlarkValue<'static>,
@@ -85,21 +104,45 @@ where
     }
 }
 
-impl<'v, T> UnpackValue<'v> for ValueOfComplex<'v, T>
+impl<'v, T> UnpackValue<'v> for ValueTypedComplex<'v, T>
 where
     T: ComplexValue<'v>,
     T::Frozen: StarlarkValue<'static>,
 {
     fn unpack_value(value: Value<'v>) -> Option<Self> {
-        if value.downcast_ref::<T>().is_some()
-            || unsafe { value.cast_lifetime() }
-                .downcast_ref::<T::Frozen>()
-                .is_some()
-        {
-            Some(ValueOfComplex(value, PhantomData))
-        } else {
-            None
-        }
+        Self::new(value)
+    }
+}
+
+impl<'v, T> From<ValueTyped<'v, T>> for ValueTypedComplex<'v, T>
+where
+    T: ComplexValue<'v>,
+    T::Frozen: StarlarkValue<'static>,
+{
+    fn from(t: ValueTyped<'v, T>) -> Self {
+        Self(t.to_value(), PhantomData)
+    }
+}
+
+impl<'v, T> fmt::Debug for ValueTypedComplex<'v, T>
+where
+    T: ComplexValue<'v>,
+    T::Frozen: StarlarkValue<'static>,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("ValueTypedComplex").field(&self.0).finish()
+    }
+}
+
+unsafe impl<'v, T> Trace<'v> for ValueTypedComplex<'v, T>
+where
+    T: ComplexValue<'v>,
+    T::Frozen: StarlarkValue<'static>,
+{
+    fn trace(&mut self, tracer: &Tracer<'v>) {
+        tracer.trace(&mut self.0);
+        // If type of value changed, dereference will produce the wrong object type.
+        debug_assert!(Self::new(self.0).is_some());
     }
 }
 
@@ -118,7 +161,7 @@ mod tests {
     use crate::assert::Assert;
     use crate::const_frozen_string;
     use crate::environment::GlobalsBuilder;
-    use crate::values::layout::complex::ValueOfComplex;
+    use crate::values::layout::complex::ValueTypedComplex;
     use crate::values::starlark_value;
     use crate::values::StarlarkValue;
     use crate::values::Value;
@@ -144,7 +187,7 @@ mod tests {
     #[starlark_module]
     fn test_module(globals: &mut GlobalsBuilder) {
         fn test_unpack<'v>(
-            v: ValueOfComplex<'v, TestValueOfComplex<Value<'v>>>,
+            v: ValueTypedComplex<'v, TestValueOfComplex<Value<'v>>>,
         ) -> anyhow::Result<&'v str> {
             Ok(match v.unpack() {
                 Either::Left(v) => v.0.unpack_str().context("not a string")?,

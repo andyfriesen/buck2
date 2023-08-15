@@ -113,7 +113,7 @@ impl AnonTargetAttrTypeCoerce for AttrType {
                         let label = dep.label().inner().clone();
 
                         let attr_type = match x.transition {
-                            DepAttrTransition::Identity => x.clone(),
+                            DepAttrTransition::Identity(..) => x.clone(),
                             DepAttrTransition::Exec => {
                                 match dep.execution_platform() {
                                 Some(exec_dep_resolution) => {
@@ -157,12 +157,7 @@ impl AnonTargetAttrTypeCoerce for AttrType {
                 },
                 None => Err(AnonTargetCoercionError::type_error("resolved_macro", value).into()),
             },
-            _ => {
-                return Err(AnonTargetCoercionError::AttrTypeNotSupported(
-                    value.get_type().to_owned(),
-                )
-                .into());
-            }
+            _ => Err(AnonTargetCoercionError::AttrTypeNotSupported(self.to_string()).into()),
         }
     }
 }

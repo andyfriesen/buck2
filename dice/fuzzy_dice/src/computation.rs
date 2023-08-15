@@ -21,8 +21,8 @@ use dice::InjectedKey;
 use dice::Key;
 use dupe::Dupe;
 use futures::future;
+use futures::future::BoxFuture;
 use futures::FutureExt;
-use gazebo::prelude::*;
 use more_futures::cancellation::CancellationContext;
 use serde::Deserialize;
 use serde::Serialize;
@@ -40,14 +40,21 @@ pub enum Unit {
 }
 
 async fn resolve_units(
-    ctx: &DiceComputations,
+    ctx: &mut DiceComputations,
     units: &[Unit],
     state: Arc<FuzzState>,
 ) -> anyhow::Result<Vec<bool>> {
-    let futs = units.map(|unit| match unit {
-        Unit::Variable(var) => ctx.eval(state.dupe(), *var),
-        Unit::Literal(lit) => async move { Ok(*lit) }.boxed(),
-    });
+    let futs = ctx.compute_many(units.iter().map(|unit| {
+        let state = state.dupe();
+        higher_order_closure! {
+            for<'x> move |ctx: &'x mut DiceComputations| -> BoxFuture<'x, Result<bool, anyhow::Error>> {
+                match unit {
+                    Unit::Variable(var) => ctx.eval(state, *var).boxed(),
+                    Unit::Literal(lit) => futures::future::ready(Ok(*lit)).boxed(),
+                }
+            }
+        }
+    }));
     future::join_all(futs).await.into_iter().collect()
 }
 
@@ -62,7 +69,7 @@ pub enum Expr {
     Xor(Vec<Unit>),
 }
 
-async fn lookup_unit(ctx: &DiceComputations, var: Var) -> anyhow::Result<Arc<Expr>> {
+async fn lookup_unit(ctx: &mut DiceComputations, var: Var) -> anyhow::Result<Arc<Expr>> {
     Ok(ctx.compute(&LookupVar(var)).await?)
 }
 
@@ -101,12 +108,12 @@ impl FuzzEquations for DiceTransactionUpdater {
 
 #[async_trait]
 pub trait FuzzMath {
-    async fn eval(&self, state: Arc<FuzzState>, var: Var) -> anyhow::Result<bool>;
+    async fn eval(&mut self, state: Arc<FuzzState>, var: Var) -> anyhow::Result<bool>;
 }
 
 #[async_trait]
 impl FuzzMath for DiceComputations {
-    async fn eval(&self, state: Arc<FuzzState>, var: Var) -> anyhow::Result<bool> {
+    async fn eval(&mut self, state: Arc<FuzzState>, var: Var) -> anyhow::Result<bool> {
         Ok(*self
             .compute(&state.eval_var(var))
             .await?
@@ -193,7 +200,7 @@ impl Key for EvalVar {
 
     async fn compute(
         &self,
-        ctx: &DiceComputations,
+        ctx: &mut DiceComputations,
         _cancellations: &CancellationContext,
     ) -> Self::Value {
         let step = self.state.next_step_for_var(self.key);
@@ -255,7 +262,7 @@ mod tests {
     pub async fn test_smoke() -> anyhow::Result<()> {
         let empty_state = Arc::new(FuzzState::new());
         let dice = Dice::builder().build(DetectCycles::Disabled);
-        let ctx = {
+        let mut ctx = {
             let mut ctx = dice.updater();
             // let x1 = true
             ctx.set_equation(Var(1), Expr::Unit(Unit::Literal(true)))?;

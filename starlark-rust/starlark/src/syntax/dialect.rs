@@ -35,6 +35,8 @@ pub(crate) enum DialectError {
     Def,
     #[error("`lambda` is not allowed in this dialect")]
     Lambda,
+    #[error("`...` is not allowed in this dialect")]
+    Ellipsis,
     #[error("`load` is not allowed in this dialect")]
     Load,
     #[error("* keyword-only-arguments is not allowed in this dialect")]
@@ -183,7 +185,7 @@ impl Dialect {
 
         TypeExprUnpackP::unpack(&x, codemap)?;
 
-        Ok(x.into_map(|node| TypeExprP {
+        Ok(x.map(|node| TypeExprP {
             expr: Spanned { node, span },
             payload: (),
         }))

@@ -47,6 +47,10 @@ load("@prelude//utils:utils.bzl", "expect", "flatten", "value_or")
 load("@prelude//open_source.bzl", "is_open_source")
 load(":cxx_context.bzl", "get_cxx_toolchain_info")
 load(
+    ":link_types.bzl",
+    "link_options",
+)
+load(
     ":linker.bzl",
     "get_default_shared_library_name",
     "get_ignore_undefined_symbols_flags",
@@ -75,37 +79,37 @@ OmnibusEnvironment = provider(fields = [
 Disposition = enum("root", "excluded", "body", "omitted")
 
 OmnibusGraph = record(
-    nodes = field({"label": LinkableNode.type}),
+    nodes = field(dict[Label, LinkableNode.type]),
     # All potential root notes for an omnibus link (e.g. C++ libraries,
     # C++ Python extensions).
-    roots = field({"label": AnnotatedLinkableRoot.type}),
+    roots = field(dict[Label, AnnotatedLinkableRoot.type]),
     # All nodes that should be excluded from libomnibus.
-    excluded = field({"label": None}),
+    excluded = field(dict[Label, None]),
 )
 
 # Bookkeeping information used to setup omnibus link rules.
 OmnibusSpec = record(
-    body = field({"label": None}, {}),
-    excluded = field({"label": None}, {}),
-    roots = field({"label": AnnotatedLinkableRoot.type}, {}),
-    exclusion_roots = field(["label"]),
+    body = field(dict[Label, None], {}),
+    excluded = field(dict[Label, None], {}),
+    roots = field(dict[Label, AnnotatedLinkableRoot.type], {}),
+    exclusion_roots = field(list[Label]),
     # All link infos.
-    link_infos = field({"label": LinkableNode.type}, {}),
-    dispositions = field({"label": Disposition.type}),
+    link_infos = field(dict[Label, LinkableNode.type], {}),
+    dispositions = field(dict[Label, Disposition.type]),
 )
 
 OmnibusPrivateRootProductCause = record(
     category = field(str),
     # Miss-assigned label
-    label = field(["label", None], default = None),
+    label = field([Label, None], default = None),
     # Its actual disposiiton
     disposition = field([Disposition.type, None], default = None),
 )
 
 OmnibusRootProduct = record(
     shared_library = field(LinkedObject.type),
-    undefined_syms = field("artifact"),
-    global_syms = field("artifact"),
+    undefined_syms = field(Artifact),
+    global_syms = field(Artifact),
     # If set, this explains why we had to use a private root for this product.
     # If unset, this means the root was a shared root we reused.
     private = field([OmnibusPrivateRootProductCause.type, None]),
@@ -119,19 +123,19 @@ AnnotatedOmnibusRootProduct = record(
 SharedOmnibusRoot = record(
     product = field(OmnibusRootProduct.type),
     linker_type = field(str),
-    required_body = field(["label"]),
-    required_exclusions = field(["label"]),
+    required_body = field(list[Label]),
+    required_exclusions = field(list[Label]),
     prefer_stripped_objects = field(bool),
 )
 
 # The result of the omnibus link.
 OmnibusSharedLibraries = record(
     omnibus = field([CxxLinkResult.type, None], None),
-    libraries = field({str: LinkedObject.type}, {}),
-    roots = field({"label": AnnotatedOmnibusRootProduct.type}, {}),
-    exclusion_roots = field(["label"]),
-    excluded = field(["label"]),
-    dispositions = field({"label": Disposition.type}),
+    libraries = field(dict[str, LinkedObject.type], {}),
+    roots = field(dict[Label, AnnotatedOmnibusRootProduct.type], {}),
+    exclusion_roots = field(list[Label]),
+    excluded = field(list[Label]),
+    dispositions = field(dict[Label, Disposition.type]),
 )
 
 def get_omnibus_graph(graph: LinkableGraph.type, roots: dict[Label, AnnotatedLinkableRoot.type], excluded: dict[Label, None]) -> OmnibusGraph.type:
@@ -267,9 +271,12 @@ def create_linkable_root(
             ctx = ctx,
             output = output,
             name = name,
-            links = [LinkArgs(flags = env.shared_root_ld_flags), LinkArgs(infos = inputs)],
-            category_suffix = "omnibus_root",
-            identifier = name or output,
+            opts = link_options(
+                links = [LinkArgs(flags = env.shared_root_ld_flags), LinkArgs(infos = inputs)],
+                category_suffix = "omnibus_root",
+                identifier = name or output,
+                link_execution_preference = LinkExecutionPreference("any"),
+            ),
         )
         shared_library = link_result.linked_object
 
@@ -325,14 +332,17 @@ def _omnibus_soname(ctx):
     linker_info = get_cxx_toolchain_info(ctx).linker_info
     return get_shared_library_name(linker_info, "omnibus")
 
-def create_dummy_omnibus(ctx: AnalysisContext, extra_ldflags: list[""] = []) -> "artifact":
+def create_dummy_omnibus(ctx: AnalysisContext, extra_ldflags: list[typing.Any] = []) -> Artifact:
     linker_info = get_cxx_toolchain_info(ctx).linker_info
     link_result = cxx_link_shared_library(
         ctx = ctx,
         output = get_shared_library_name(linker_info, "omnibus-dummy"),
         name = _omnibus_soname(ctx),
-        links = [LinkArgs(flags = extra_ldflags)],
-        category_suffix = "dummy_omnibus",
+        opts = link_options(
+            links = [LinkArgs(flags = extra_ldflags)],
+            category_suffix = "dummy_omnibus",
+            link_execution_preference = LinkExecutionPreference("any"),
+        ),
     )
     return link_result.linked_object.output
 
@@ -372,9 +382,9 @@ def _create_root(
         root: LinkableRootInfo.type,
         label: Label,
         link_deps: list[Label],
-        omnibus: "artifact",
+        omnibus: Artifact,
         pic_behavior: PicBehavior.type,
-        extra_ldflags: list[""] = [],
+        extra_ldflags: list[typing.Any] = [],
         prefer_stripped_objects: bool = False) -> OmnibusRootProduct.type:
     """
     Link a root omnibus node.
@@ -469,13 +479,15 @@ def _create_root(
         ctx = ctx,
         output = output,
         name = root.name,
-        links = [LinkArgs(flags = extra_ldflags), LinkArgs(infos = inputs)],
-        category_suffix = "omnibus_root",
-        identifier = root.name or output,
-        # We prefer local execution because there are lot of cxx_link_omnibus_root
-        # running simultaneously, so while their overall load is reasonable,
-        # their peak execution load is very high.
-        link_execution_preference = LinkExecutionPreference("local"),
+        opts = link_options(
+            links = [LinkArgs(flags = extra_ldflags), LinkArgs(infos = inputs)],
+            category_suffix = "omnibus_root",
+            identifier = root.name or output,
+            # We prefer local execution because there are lot of cxx_link_omnibus_root
+            # running simultaneously, so while their overall load is reasonable,
+            # their peak execution load is very high.
+            link_execution_preference = LinkExecutionPreference("local"),
+        ),
     )
     shared_library = link_result.linked_object
 
@@ -530,8 +542,8 @@ def _requires_private_root(
 def _extract_global_symbols_from_link_args(
         ctx: AnalysisContext,
         name: str,
-        link_args: list[["artifact", "resolved_macro", cmd_args, str]],
-        prefer_local: bool = False) -> "artifact":
+        link_args: list[[Artifact, "resolved_macro", cmd_args, str]],
+        prefer_local: bool = False) -> Artifact:
     """
     Extract global symbols explicitly set in the given linker args (e.g.
     `-Wl,--export-dynamic-symbol=<sym>`).
@@ -577,8 +589,8 @@ def _extract_global_symbols_from_link_args(
 def _create_global_symbols_version_script(
         ctx: AnalysisContext,
         roots: list[AnnotatedOmnibusRootProduct.type],
-        excluded: list["artifact"],
-        link_args: list[["artifact", "resolved_macro", cmd_args, str]]) -> "artifact":
+        excluded: list[Artifact],
+        link_args: list[[Artifact, "resolved_macro", cmd_args, str]]) -> Artifact:
     """
     Generate a version script exporting symbols from from the given objects and
     link args.
@@ -635,7 +647,7 @@ def _create_omnibus(
         spec: OmnibusSpec.type,
         annotated_root_products,
         pic_behavior: PicBehavior.type,
-        extra_ldflags: list[""] = [],
+        extra_ldflags: list[typing.Any] = [],
         prefer_stripped_objects: bool = False) -> CxxLinkResult.type:
     inputs = []
 
@@ -739,19 +751,21 @@ def _create_omnibus(
         ctx = ctx,
         output = soname,
         name = soname,
-        links = [LinkArgs(flags = extra_ldflags), LinkArgs(infos = inputs)],
-        category_suffix = "omnibus",
-        # TODO(T110378138): As with static C++ links, omnibus links are
-        # currently too large for RE, so run them locally for now (e.g.
-        # https://fb.prod.workplace.com/groups/buck2dev/posts/2953023738319012/).
-        # NB: We explicitly pass a value here to override
-        # the linker_info.link_libraries_locally that's used by `cxx_link_shared_library`.
-        # That's because we do not want to apply the linking behavior universally,
-        # just use it for omnibus.
-        link_execution_preference = get_resolved_cxx_binary_link_execution_preference(ctx, [], use_hybrid_links_for_libomnibus(ctx), toolchain_info),
-        link_weight = linker_info.link_weight,
-        enable_distributed_thinlto = ctx.attrs.enable_distributed_thinlto,
-        identifier = soname,
+        opts = link_options(
+            links = [LinkArgs(flags = extra_ldflags), LinkArgs(infos = inputs)],
+            category_suffix = "omnibus",
+            # TODO(T110378138): As with static C++ links, omnibus links are
+            # currently too large for RE, so run them locally for now (e.g.
+            # https://fb.prod.workplace.com/groups/buck2dev/posts/2953023738319012/).
+            # NB: We explicitly pass a value here to override
+            # the linker_info.link_libraries_locally that's used by `cxx_link_shared_library`.
+            # That's because we do not want to apply the linking behavior universally,
+            # just use it for omnibus.
+            link_execution_preference = get_resolved_cxx_binary_link_execution_preference(ctx, [], use_hybrid_links_for_libomnibus(ctx), toolchain_info),
+            link_weight = linker_info.link_weight,
+            enable_distributed_thinlto = ctx.attrs.enable_distributed_thinlto,
+            identifier = soname,
+        ),
     )
 
 def _build_omnibus_spec(
@@ -877,7 +891,7 @@ def _ordered_roots(
 def create_omnibus_libraries(
         ctx: AnalysisContext,
         graph: OmnibusGraph.type,
-        extra_ldflags: list[""] = [],
+        extra_ldflags: list[typing.Any] = [],
         prefer_stripped_objects: bool = False) -> OmnibusSharedLibraries.type:
     spec = _build_omnibus_spec(ctx, graph)
     pic_behavior = get_cxx_toolchain_info(ctx).pic_behavior

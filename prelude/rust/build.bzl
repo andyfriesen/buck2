@@ -5,6 +5,7 @@
 # License, Version 2.0 found in the LICENSE-APACHE file in the root directory
 # of this source tree.
 
+load("@prelude//:artifact_tset.bzl", "project_artifacts")
 load("@prelude//:local_only.bzl", "link_cxx_binary_locally")
 load("@prelude//:paths.bzl", "paths")
 load("@prelude//:resources.bzl", "create_resource_db", "gather_resources")
@@ -16,6 +17,7 @@ load(
     "make_link_args",
 )
 load("@prelude//cxx:cxx_toolchain_types.bzl", "LinkerInfo")
+load("@prelude//cxx:debug.bzl", "SplitDebugMode")
 load("@prelude//cxx:dwp.bzl", "dwp", "dwp_available")
 load(
     "@prelude//cxx:linker.bzl",
@@ -25,7 +27,7 @@ load(
 load(
     "@prelude//linking:link_info.bzl",
     "LinkArgs",
-    "LinkStyle",  #@unused Used as a type
+    "LinkStyle",
     "get_link_args",
 )
 load(
@@ -57,10 +59,12 @@ load(
 load(
     ":link_info.bzl",
     "CrateName",  #@unused Used as a type
+    "RustCxxLinkGroupInfo",  #@unused Used as a type
     "RustLinkInfo",
     "RustLinkStyleInfo",
     "attr_crate",
     "attr_simple_crate_for_filenames",
+    "inherited_external_debug_info",
     "inherited_non_rust_link_info",
     "inherited_non_rust_shared_libs",
     "normalize_crate",
@@ -71,10 +75,13 @@ load(":resources.bzl", "rust_attr_resources")
 load(":rust_toolchain.bzl", "RustToolchainInfo", "ctx_toolchain_info")
 
 RustcOutput = record(
-    output = field("artifact"),
-    diag = field({str: "artifact"}),
-    pdb = field(["artifact", None]),
-    dwp_output = field(["artifact", None]),
+    output = field(Artifact),
+    diag = field(dict[str, Artifact]),
+    pdb = field([Artifact, None]),
+    dwp_output = field([Artifact, None]),
+    # Zero or more Split DWARF debug info files are emitted into this directory
+    # with unpredictable filenames.
+    dwo_output_directory = field([Artifact, None]),
 )
 
 def compile_context(ctx: AnalysisContext) -> CompileContext.type:
@@ -125,7 +132,7 @@ def generate_rustdoc(
         # with static-pic (to get best cache hits for deps)
         params: BuildParams.type,
         default_roots: list[str],
-        document_private_items: bool) -> "artifact":
+        document_private_items: bool) -> Artifact:
     toolchain_info = compile_ctx.toolchain_info
 
     common_args = _compute_common_args(
@@ -135,7 +142,7 @@ def generate_rustdoc(
         # rather than full .rlibs
         emit = Emit("metadata"),
         params = params,
-        link_style = params.dep_link_style,
+        dep_link_style = params.dep_link_style,
         default_roots = default_roots,
         is_rustdoc_test = False,
     )
@@ -237,7 +244,7 @@ def generate_rustdoc_test(
         compile_ctx = compile_ctx,
         emit = Emit("link"),
         params = params,
-        link_style = params.dep_link_style,
+        dep_link_style = params.dep_link_style,
         default_roots = default_roots,
         is_rustdoc_test = True,
         extra_transitive_deps = library.transitive_deps,
@@ -302,12 +309,14 @@ def rust_compile_multi(
         compile_ctx: CompileContext.type,
         emits: list[Emit.type],
         params: BuildParams.type,
-        link_style: LinkStyle.type,
+        dep_link_style: LinkStyle.type,
         default_roots: list[str],
-        extra_link_args: list[""] = [],
-        predeclared_outputs: dict[Emit.type, "artifact"] = {},
+        extra_link_args: list[typing.Any] = [],
+        predeclared_outputs: dict[Emit.type, Artifact] = {},
         extra_flags: list[[str, "resolved_macro"]] = [],
-        is_binary: bool = False) -> list[RustcOutput.type]:
+        is_binary: bool = False,
+        allow_cache_upload: bool = False,
+        rust_cxx_link_group_info: [RustCxxLinkGroupInfo, None] = None) -> list[RustcOutput.type]:
     outputs = []
 
     for emit in emits:
@@ -316,12 +325,14 @@ def rust_compile_multi(
             compile_ctx = compile_ctx,
             emit = emit,
             params = params,
-            link_style = link_style,
+            dep_link_style = dep_link_style,
             default_roots = default_roots,
             extra_link_args = extra_link_args,
             predeclared_outputs = predeclared_outputs,
             extra_flags = extra_flags,
             is_binary = is_binary,
+            allow_cache_upload = allow_cache_upload,
+            rust_cxx_link_group_info = rust_cxx_link_group_info,
         )
         outputs.append(outs)
 
@@ -335,12 +346,14 @@ def rust_compile(
         compile_ctx: CompileContext.type,
         emit: Emit.type,
         params: BuildParams.type,
-        link_style: LinkStyle.type,
+        dep_link_style: LinkStyle.type,
         default_roots: list[str],
-        extra_link_args: list[""] = [],
-        predeclared_outputs: dict[Emit.type, "artifact"] = {},
+        extra_link_args: list[typing.Any] = [],
+        predeclared_outputs: dict[Emit.type, Artifact] = {},
         extra_flags: list[[str, "resolved_macro"]] = [],
-        is_binary: bool = False) -> RustcOutput.type:
+        is_binary: bool = False,
+        allow_cache_upload: bool = False,
+        rust_cxx_link_group_info: [RustCxxLinkGroupInfo, None] = None) -> RustcOutput.type:
     exec_is_windows = ctx.attrs._exec_os_type[OsLookup].platform == "windows"
 
     toolchain_info = compile_ctx.toolchain_info
@@ -352,7 +365,7 @@ def rust_compile(
         compile_ctx = compile_ctx,
         emit = emit,
         params = params,
-        link_style = link_style,
+        dep_link_style = dep_link_style,
         default_roots = default_roots,
         is_rustdoc_test = False,
     )
@@ -375,7 +388,7 @@ def rust_compile(
     # use the predeclared one as the output after the failure filter action
     # below. Otherwise we'll use the predeclared outputs directly.
     if toolchain_info.failure_filter:
-        emit_output, emit_args = _rustc_emit(
+        emit_output, emit_args, extra_out = _rustc_emit(
             ctx = ctx,
             compile_ctx = compile_ctx,
             emit = emit,
@@ -384,7 +397,7 @@ def rust_compile(
             params = params,
         )
     else:
-        emit_output, emit_args = _rustc_emit(
+        emit_output, emit_args, extra_out = _rustc_emit(
             ctx = ctx,
             compile_ctx = compile_ctx,
             emit = emit,
@@ -401,14 +414,27 @@ def rust_compile(
 
         # If this crate type has an associated native dep link style, include deps
         # of that style.
+
+        if rust_cxx_link_group_info:
+            inherited_non_rust_link_args = LinkArgs(
+                infos = rust_cxx_link_group_info.filtered_links + [rust_cxx_link_group_info.symbol_files_info],
+            )
+
+        else:
+            inherited_non_rust_link_args = get_link_args(
+                inherited_non_rust_link_info(
+                    ctx,
+                    include_doc_deps = False,
+                    link_style = dep_link_style,
+                ),
+                dep_link_style,
+            )
+
         (link_args, hidden, pdb_artifact) = make_link_args(
             ctx,
             [
                 LinkArgs(flags = extra_link_args),
-                get_link_args(
-                    inherited_non_rust_link_info(ctx),
-                    link_style,
-                ),
+                inherited_non_rust_link_args,
             ],
             "{}-{}".format(subdir, tempfile),
             output_short_path = emit_output.short_path,
@@ -419,7 +445,7 @@ def rust_compile(
             allow_args = True,
         )
 
-        dwp_inputs = link_args
+        dwp_inputs = [link_args]
         rustc_cmd.add(cmd_args(linker_argsfile, format = "-Clink-arg=@{}"))
         rustc_cmd.hidden(hidden)
 
@@ -429,16 +455,17 @@ def rust_compile(
         prefix = "{}/{}".format(common_args.subdir, common_args.tempfile),
         rustc_cmd = cmd_args(toolchain_info.compiler, rustc_cmd, emit_args),
         diag = "diag",
-        outputs = [emit_output],
+        required_outputs = [emit_output],
         short_cmd = common_args.short_cmd,
         is_binary = is_binary,
+        allow_cache_upload = allow_cache_upload,
         crate_map = common_args.crate_map,
     )
 
     # Add clippy diagnostic targets for check builds
     if common_args.is_check:
         # We don't really need the outputs from this build, just to keep the artifact accounting straight
-        clippy_out, clippy_emit_args = _rustc_emit(
+        clippy_out, clippy_emit_args, _extra_out = _rustc_emit(
             ctx = ctx,
             compile_ctx = compile_ctx,
             emit = emit,
@@ -466,9 +493,10 @@ def rust_compile(
             rustc_cmd = cmd_args(compile_ctx.clippy_wrapper, clippy_lints, rustc_cmd, clippy_emit_args),
             env = clippy_env,
             diag = "clippy",
-            outputs = [clippy_out],
+            required_outputs = [clippy_out],
             short_cmd = common_args.short_cmd,
             is_binary = False,
+            allow_cache_upload = False,
             crate_map = common_args.crate_map,
         )
         diag.update(clippy_diag)
@@ -495,8 +523,20 @@ def rust_compile(
     else:
         filtered_output = emit_output
 
+    split_debug_mode = compile_ctx.cxx_toolchain_info.split_debug_mode or SplitDebugMode("none")
+    if emit == Emit("link") and split_debug_mode != SplitDebugMode("none"):
+        dwo_output_directory = extra_out
+        external_debug_info = inherited_external_debug_info(
+            ctx = ctx,
+            dwo_output_directory = dwo_output_directory,
+            dep_link_style = params.dep_link_style,
+        )
+        dwp_inputs.extend(project_artifacts(ctx.actions, [external_debug_info]))
+    else:
+        dwo_output_directory = None
+
     if is_binary and dwp_available(ctx):
-        filtered_dwp_output = dwp(
+        dwp_output = dwp(
             ctx,
             emit_output,
             identifier = "{}/__{}_{}_dwp".format(common_args.subdir, common_args.tempfile, str(emit)),
@@ -508,13 +548,14 @@ def rust_compile(
             referenced_objects = dwp_inputs,
         )
     else:
-        filtered_dwp_output = None
+        dwp_output = None
 
     return RustcOutput(
         output = filtered_output,
         diag = diag,
         pdb = pdb_artifact,
-        dwp_output = filtered_dwp_output,
+        dwp_output = dwp_output,
+        dwo_output_directory = dwo_output_directory,
     )
 
 # --extern <crate>=<path> for direct dependencies
@@ -527,10 +568,10 @@ def _dependency_args(
         compile_ctx: CompileContext.type,
         subdir: str,
         crate_type: CrateType.type,
-        link_style: LinkStyle.type,
+        dep_link_style: LinkStyle.type,
         is_check: bool,
         is_rustdoc_test: bool,
-        extra_transitive_deps: dict["artifact", CrateName.type]) -> (cmd_args, list[(CrateName.type, Label)]):
+        extra_transitive_deps: dict[Artifact, CrateName.type]) -> (cmd_args, list[(CrateName.type, Label)]):
     args = cmd_args()
     transitive_deps = {}
     deps = []
@@ -552,7 +593,7 @@ def _dependency_args(
         else:
             crate = info.crate
 
-        style = style_info(info, link_style)
+        style = style_info(info, dep_link_style)
 
         # Use rmeta dependencies whenever possible because they
         # should be cheaper to produce.
@@ -590,7 +631,7 @@ def _dependency_args(
 def simple_symlinked_dirs(
         ctx: AnalysisContext,
         prefix: str,
-        artifacts: dict["artifact", None]) -> cmd_args:
+        artifacts: dict[Artifact, None]) -> cmd_args:
     # Add as many -Ldependency dirs as we need to avoid name conflicts
     deps_dirs = [{}]
     for dep in artifacts.keys():
@@ -610,7 +651,7 @@ def dynamic_symlinked_dirs(
         ctx: AnalysisContext,
         compile_ctx: CompileContext.type,
         prefix: str,
-        artifacts: dict["artifact", CrateName.type]) -> cmd_args:
+        artifacts: dict[Artifact, CrateName.type]) -> cmd_args:
     name = "{}-dyn".format(prefix)
     transitive_dependency_dir = ctx.actions.declare_output(name, dir = True)
     do_symlinks = cmd_args(
@@ -667,18 +708,18 @@ def _compute_common_args(
         compile_ctx: CompileContext.type,
         emit: Emit.type,
         params: BuildParams.type,
-        link_style: LinkStyle.type,
+        dep_link_style: LinkStyle.type,
         default_roots: list[str],
         is_rustdoc_test: bool,
-        extra_transitive_deps: dict["artifact", CrateName.type] = {}) -> CommonArgsInfo.type:
+        extra_transitive_deps: dict[Artifact, CrateName.type] = {}) -> CommonArgsInfo.type:
     crate_type = params.crate_type
 
-    args_key = (crate_type, emit, link_style, is_rustdoc_test)
+    args_key = (crate_type, emit, dep_link_style, is_rustdoc_test)
     if args_key in compile_ctx.common_args:
         return compile_ctx.common_args[args_key]
 
     # Keep filenames distinct in per-flavour subdirs
-    subdir = "{}-{}-{}-{}".format(crate_type.value, params.reloc_model.value, link_style.value, emit.value)
+    subdir = "{}-{}-{}-{}".format(crate_type.value, params.reloc_model.value, dep_link_style.value, emit.value)
     if is_rustdoc_test:
         subdir = "{}-rustdoc-test".format(subdir)
 
@@ -697,7 +738,7 @@ def _compute_common_args(
         compile_ctx = compile_ctx,
         subdir = subdir,
         crate_type = crate_type,
-        link_style = link_style,
+        dep_link_style = dep_link_style,
         is_check = is_check,
         is_rustdoc_test = is_rustdoc_test,
         extra_transitive_deps = extra_transitive_deps,
@@ -724,6 +765,48 @@ def _compute_common_args(
     else:
         crate_name_arg = cmd_args("--crate-name=", crate.simple, delimiter = "")
 
+    split_debuginfo_flags = {
+        # Rustc's default behavior: debug info is put into every rlib and
+        # staticlib, then copied into the executables and shared libraries by
+        # the linker. This corresponds to `-gno-split-dwarf` in Clang.
+        SplitDebugMode("none"): [],
+
+        # Split DWARF: debug info is placed into *.dwo files in the directory
+        # specified by `--out-dir`. In Buck, this directory is usually called
+        # "extras" that is a sibling of the main output artifact (rlib,
+        # staticlib, executable, or shared library).
+        #
+        # Rustc produces one *.dwo per LLVM codegen unit, meaning potentially
+        # multiple per crate. The only debug info included into the main output
+        # artifact is the list of the associated *.dwo filenames in which the
+        # real debug info is provided.
+        #
+        # For each binary target, we have a separate step which involves
+        # `llvm-dwp` to combine all the *.dwo files from the dependency graph
+        # into one *.dwp. This is handled as a separate Buck action from the
+        # compiler/linker invocation responsible for linking the executable or
+        # shared library artifact.
+        #
+        # Rust's `-Csplit-debuginfo=unpacked` corresponds to `-gsplit-dwarf=split`
+        # in Clang, which behaves as just described.
+        #
+        # There is a second Clang debug mode, `-gsplit-dwarf=single`, that we
+        # also implement using `-Csplit-debuginfo=unpacked` in Rust. In Clang,
+        # "single" means include debug info into object files conceptually like
+        # `-gno-split-dwarf`, but do _not_ copy it at link time into executables
+        # and shared libraries. Similar to "split", there is an `llvm-dwp` step,
+        # separate from linking, to combine debug info from the dependency graph
+        # into one *.dwp output. Rustc has an option `-Csplit-debuginfo=packed`
+        # which works this way, putting split debug info into rlibs for
+        # libraries but keeping it separate for binaries. We have not been able
+        # to use `-Csplit-debuginfo=packed` because it runs into an error "unit
+        # referenced by executable was not found" when dealing with chains of
+        # dependencies from Rust -> C++ -> Rust (T147665047).
+        SplitDebugMode("single"): ["-Csplit-debuginfo=unpacked"],
+
+        # TODO: SplitDebugMode("split"): ["-Csplit-debuginfo=unpacked"],
+    }[compile_ctx.cxx_toolchain_info.split_debug_mode or SplitDebugMode("none")]
+
     args = cmd_args(
         cmd_args(compile_ctx.symlinked_srcs, "/", crate_root, delimiter = ""),
         crate_name_arg,
@@ -735,6 +818,7 @@ def _compute_common_args(
         ["--error-format=json", "--json=diagnostic-rendered-ansi"] if not is_rustdoc_test else [],
         ["-Cprefer-dynamic=yes"] if crate_type == CrateType("dylib") else [],
         ["--target={}".format(toolchain_info.rustc_target_triple)] if toolchain_info.rustc_target_triple else [],
+        split_debuginfo_flags,
         _rustc_flags(toolchain_info.rustc_flags),
         _rustc_flags(toolchain_info.rustc_check_flags) if is_check else [],
         _rustc_flags(toolchain_info.rustc_coverage_flags) if ctx.attrs.coverage else [],
@@ -855,9 +939,9 @@ def _rustc_emit(
         ctx: AnalysisContext,
         compile_ctx: CompileContext.type,
         emit: Emit.type,
-        predeclared_outputs: dict[Emit.type, "artifact"],
+        predeclared_outputs: dict[Emit.type, Artifact],
         subdir: str,
-        params: BuildParams.type) -> ("artifact", cmd_args):
+        params: BuildParams.type) -> (Artifact, cmd_args, [Artifact, None]):
     toolchain_info = compile_ctx.toolchain_info
     simple_crate = attr_simple_crate_for_filenames(ctx)
     crate_type = params.crate_type
@@ -907,6 +991,7 @@ def _rustc_emit(
         # https://github.com/rust-lang/rust/pull/85362 is applied)
         emit_args.add(cmd_args("--emit=", emit.value, "=", emit_output.as_output(), delimiter = ""))
 
+    extra_out = None
     if emit != Emit("expand"):
         # Strip file extension from directory name.
         base, _ext = paths.split_extension(output_filename(simple_crate, emit, params))
@@ -920,7 +1005,7 @@ def _rustc_emit(
             incremental_cmd = cmd_args(incremental_out.as_output(), format = "-Cincremental={}")
             emit_args.add(incremental_cmd)
 
-    return (emit_output, emit_args)
+    return (emit_output, emit_args, extra_out)
 
 # Invoke rustc and capture outputs
 def _rustc_invoke(
@@ -929,11 +1014,12 @@ def _rustc_invoke(
         prefix: str,
         rustc_cmd: cmd_args,
         diag: str,
-        outputs: list["artifact"],
+        required_outputs: list[Artifact],
         short_cmd: str,
         is_binary: bool,
+        allow_cache_upload: bool,
         crate_map: list[(CrateName.type, Label)],
-        env: dict[str, ["resolved_macro", "artifact"]] = {}) -> (dict[str, "artifact"], ["artifact", None]):
+        env: dict[str, ["resolved_macro", Artifact]] = {}) -> (dict[str, Artifact], [Artifact, None]):
     toolchain_info = compile_ctx.toolchain_info
 
     plain_env, path_env = _process_env(compile_ctx, ctx.attrs.env)
@@ -949,7 +1035,7 @@ def _rustc_invoke(
     compile_cmd = cmd_args(
         cmd_args(json_diag.as_output(), format = "--diag-json={}"),
         cmd_args(txt_diag.as_output(), format = "--diag-txt={}"),
-        "--remap-cwd-prefix=",
+        "--remap-cwd-prefix=.",
         "--buck-target={}".format(ctx.label.raw_target()),
     )
 
@@ -965,7 +1051,7 @@ def _rustc_invoke(
         # Build status for fail filter
         build_status = ctx.actions.declare_output("{}_build_status-{}.json".format(prefix, diag))
         compile_cmd.add(cmd_args(build_status.as_output(), format = "--failure-filter={}"))
-        for out in outputs:
+        for out in required_outputs:
             compile_cmd.add("--required-output", out.short_path, out.as_output())
 
     compile_cmd.add(rustc_cmd)
@@ -994,6 +1080,7 @@ def _rustc_invoke(
         category = "rustc",
         identifier = identifier,
         no_outputs_cleanup = incremental_enabled,
+        allow_cache_upload = allow_cache_upload,
     )
 
     return ({diag + ".json": json_diag, diag + ".txt": txt_diag}, build_status)
@@ -1019,7 +1106,7 @@ def _long_command(
 # path and non-path content, but we'll burn that bridge when we get to it.)
 def _process_env(
         compile_ctx: CompileContext.type,
-        env: dict[str, ["resolved_macro", "artifact"]]) -> (dict[str, cmd_args], dict[str, cmd_args]):
+        env: dict[str, ["resolved_macro", Artifact]]) -> (dict[str, cmd_args], dict[str, cmd_args]):
     # Values with inputs (ie artifact references).
     path_env = {}
 

@@ -17,14 +17,8 @@
 
 //! Test call expression and parameter binding.
 
-use starlark_derive::starlark_module;
-
-use crate as starlark;
 use crate::assert;
 use crate::assert::Assert;
-use crate::environment::GlobalsBuilder;
-use crate::values::UnpackValue;
-use crate::values::Value;
 
 #[test]
 fn funcall_test() {
@@ -250,8 +244,18 @@ noop(f)(1)
     );
 }
 
+// This test relies on stack behavior which does not hold when
+// ASAN is enabled. See D47571173 for more context.
+#[cfg_attr(rust_nightly, cfg(not(sanitize = "address")))]
 #[test]
 fn test_frame_size() {
+    use starlark_derive::starlark_module;
+
+    use crate as starlark;
+    use crate::environment::GlobalsBuilder;
+    use crate::values::UnpackValue;
+    use crate::values::Value;
+
     #[starlark_module]
     fn natives(builder: &mut GlobalsBuilder) {
         fn stack_ptr(args: Vec<Value>) -> anyhow::Result<usize> {

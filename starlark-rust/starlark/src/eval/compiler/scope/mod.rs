@@ -23,7 +23,6 @@ use std::collections::HashMap;
 use std::iter;
 use std::marker::PhantomData;
 use std::mem;
-use std::slice;
 
 use dupe::Dupe;
 use starlark_derive::VisitSpanMut;
@@ -48,18 +47,21 @@ use crate::eval::compiler::scope::payload::CstStmt;
 use crate::eval::compiler::scope::payload::CstTypeExpr;
 use crate::eval::compiler::EvalException;
 use crate::eval::runtime::slots::LocalSlotIdCapturedOrNot;
-use crate::syntax::ast::Assign;
 use crate::syntax::ast::AssignIdent;
+use crate::syntax::ast::AssignP;
+use crate::syntax::ast::AssignTarget;
 use crate::syntax::ast::AstAssignIdentP;
 use crate::syntax::ast::AstStmt;
 use crate::syntax::ast::ClauseP;
 use crate::syntax::ast::DefP;
 use crate::syntax::ast::ExprP;
 use crate::syntax::ast::ForClauseP;
+use crate::syntax::ast::ForP;
 use crate::syntax::ast::LambdaP;
 use crate::syntax::ast::Stmt;
 use crate::syntax::ast::StmtP;
 use crate::syntax::ast::Visibility;
+use crate::syntax::top_level_stmts::top_level_stmts_mut;
 use crate::syntax::uniplate::VisitMut;
 use crate::syntax::Dialect;
 use crate::typing::error::InternalError;
@@ -275,14 +277,7 @@ impl<'f> ModuleScopeBuilder<'f> {
         let scope_id = scope_data.new_scope().0;
         let mut cst = CstStmt::from_ast(stmt, &mut scope_data, loads);
 
-        let top_level_stmts: &mut [CstStmt] = match &mut cst.node {
-            StmtP::Statements(stmts) => {
-                // TODO(nga): single-line top-level statements like `a(); b()`
-                //   will be treated as multiple top-level statements.
-                stmts
-            }
-            _ => slice::from_mut(&mut cst),
-        };
+        let mut top_level_stmts = top_level_stmts_mut(&mut cst);
 
         // Not really important, sanity check
         assert_eq!(scope_id, ScopeId::module());
@@ -588,8 +583,7 @@ impl<'f> ModuleScopeBuilder<'f> {
                 None,
                 top_level_stmt_index,
             ),
-            StmtP::Assign(lhs, ty_rhs) => {
-                let (ty, rhs) = &mut **ty_rhs;
+            StmtP::Assign(AssignP { lhs, ty, rhs }) => {
                 self.resolve_idents_in_assign(lhs, top_level_stmt_index);
                 if let Some(ty) = ty {
                     self.resolve_idents_in_type_expr(ty, top_level_stmt_index);
@@ -849,7 +843,7 @@ impl<'f> ModuleScopeBuilder<'f> {
         let scope_id = self.top_scope_id();
         let mut locals = SmallMap::new();
         for var in var {
-            Assign::collect_defines_lvalue(
+            AssignTarget::collect_defines_lvalue(
                 var,
                 top_level_stmt_index,
                 InLoop::Yes,
@@ -927,8 +921,8 @@ impl Stmt {
         dialect: &Dialect,
     ) {
         match &mut stmt.node {
-            StmtP::Assign(dest, _) | StmtP::AssignModify(dest, _, _) => {
-                Assign::collect_defines_lvalue(
+            StmtP::Assign(AssignP { lhs: dest, .. }) | StmtP::AssignModify(dest, _, _) => {
+                AssignTarget::collect_defines_lvalue(
                     dest,
                     top_level_stmt_index,
                     in_loop,
@@ -937,10 +931,9 @@ impl Stmt {
                     result,
                 );
             }
-            StmtP::For(dest, over_body) => {
-                let (_over, body) = &mut **over_body;
-                Assign::collect_defines_lvalue(
-                    dest,
+            StmtP::For(ForP { var, over: _, body }) => {
+                AssignTarget::collect_defines_lvalue(
+                    var,
                     top_level_stmt_index,
                     InLoop::Yes,
                     scope_data,
@@ -1070,7 +1063,7 @@ impl AssignIdent {
     }
 }
 
-impl Assign {
+impl AssignTarget {
     // Collect variables defined in an expression on the LHS of an assignment (or
     // for variable etc)
     fn collect_defines_lvalue<'a>(

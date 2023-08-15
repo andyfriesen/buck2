@@ -18,12 +18,9 @@ use buck2_build_api::query::oneshot::QUERY_FRONTEND;
 use buck2_cli_proto::CqueryRequest;
 use buck2_cli_proto::CqueryResponse;
 use buck2_common::dice::cells::HasCellResolver;
-use buck2_common::events::HasEvents;
 use buck2_core::configuration::compatibility::MaybeCompatible;
 use buck2_core::provider::label::ConfiguredProvidersLabel;
 use buck2_core::provider::label::ProvidersName;
-use buck2_data::QueryEvaluationEnd;
-use buck2_data::QueryEvaluationStart;
 use buck2_node::nodes::configured::ConfiguredTargetNode;
 use buck2_query::query::syntax::simple::eval::values::QueryEvaluationResult;
 use buck2_server_ctx::ctx::ServerCommandContextTrait;
@@ -90,7 +87,7 @@ impl ServerCommandTemplate for CqueryServerCommand {
 async fn cquery(
     server_ctx: &dyn ServerCommandContextTrait,
     mut stdout: impl Write,
-    ctx: DiceTransaction,
+    mut ctx: DiceTransaction,
     request: &CqueryRequest,
 ) -> anyhow::Result<CqueryResponse> {
     let cell_resolver = ctx.get_cell_resolver().await?;
@@ -122,35 +119,24 @@ async fn cquery(
     let target_call_stacks = client_ctx.target_call_stacks;
 
     let global_target_platform =
-        target_platform_from_client_context(client_ctx, server_ctx, &ctx).await?;
+        target_platform_from_client_context(client_ctx, server_ctx, &mut ctx).await?;
 
     let owner_behavior = match correct_owner {
         true => CqueryOwnerBehavior::Correct,
         false => CqueryOwnerBehavior::Deprecated,
     };
 
-    let query_frontend = QUERY_FRONTEND.get()?;
-    let ctx_ref = &ctx;
-    let query_result = ctx_ref
-        .per_transaction_data()
-        .get_dispatcher()
-        .dupe()
-        .span_async(QueryEvaluationStart {}, async move {
-            (
-                query_frontend
-                    .eval_cquery(
-                        ctx_ref,
-                        server_ctx.working_dir(),
-                        owner_behavior,
-                        query,
-                        query_args,
-                        global_target_platform,
-                        target_universe,
-                    )
-                    .await,
-                QueryEvaluationEnd {},
-            )
-        })
+    let query_result = QUERY_FRONTEND
+        .get()?
+        .eval_cquery(
+            &ctx,
+            server_ctx.working_dir(),
+            owner_behavior,
+            query,
+            query_args,
+            global_target_platform,
+            target_universe,
+        )
         .await?;
 
     let should_print_providers = if *show_providers {

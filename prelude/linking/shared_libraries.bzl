@@ -10,14 +10,14 @@ load(
     "@prelude//linking:link_info.bzl",
     "LinkedObject",  # @unused Used as a type
 )
-load("@prelude//linking:strip.bzl", "strip_shared_library")
+load("@prelude//linking:strip.bzl", "strip_object")
 
 SharedLibrary = record(
     lib = field(LinkedObject.type),
-    stripped_lib = field(["artifact", None]),
+    stripped_lib = field([Artifact, None]),
     can_be_asset = field(bool),
     for_primary_apk = field(bool),
-    label = field("label"),
+    label = field(Label),
 )
 
 SharedLibraries = record(
@@ -25,7 +25,7 @@ SharedLibraries = record(
     # Since the SONAME is what the dynamic loader uses to uniquely identify
     # libraries, using this as the key allows easily detecting conflicts from
     # dependencies.
-    libraries = field({str: SharedLibrary.type}),
+    libraries = field(dict[str, SharedLibrary.type]),
 )
 
 # T-set of SharedLibraries
@@ -54,7 +54,7 @@ def create_shared_libraries(
     return SharedLibraries(
         libraries = {name: SharedLibrary(
             lib = shlib,
-            stripped_lib = strip_shared_library(
+            stripped_lib = strip_object(
                 ctx,
                 cxx_toolchain[CxxToolchainInfo],
                 shlib.output,
@@ -101,9 +101,9 @@ def _merge_lib_map(
 # SharedLibraryInfo but it cannot produce any. The value in `deps` represents
 # all the inherited shared libraries for this target.
 def merge_shared_libraries(
-        actions: "actions",
+        actions: AnalysisActions,
         node: ["SharedLibraries", None] = None,
-        deps: list["SharedLibraryInfo"] = []) -> "SharedLibraryInfo":
+        deps: list[SharedLibraryInfo.type] = []) -> SharedLibraryInfo.type:
     kwargs = {}
 
     children = filter(None, [dep.set for dep in deps])
@@ -116,7 +116,7 @@ def merge_shared_libraries(
     return SharedLibraryInfo(set = set)
 
 def traverse_shared_library_info(
-        info: "SharedLibraryInfo"):  # -> {str: SharedLibrary.type}:
+        info: SharedLibraryInfo.type):  # -> {str: SharedLibrary.type}:
     libraries = {}
     if info.set:
         for libs in info.set.traverse():

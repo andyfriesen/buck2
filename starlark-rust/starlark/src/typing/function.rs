@@ -22,15 +22,20 @@ use std::fmt::Formatter;
 use std::hash::Hash;
 
 use allocative::Allocative;
+use dupe::Dupe;
 
 use crate::codemap::Span;
 use crate::codemap::Spanned;
 use crate::typing::custom::TyCustomImpl;
-use crate::typing::error::TypingError;
+use crate::typing::error::TypingOrInternalError;
 use crate::typing::Ty;
 use crate::typing::TypingAttr;
 use crate::typing::TypingBinOp;
 use crate::typing::TypingOracleCtx;
+use crate::values::typing::type_compiled::compiled::TypeCompiled;
+use crate::values::typing::type_compiled::compiled::TypeCompiledImpl;
+use crate::values::typing::type_compiled::factory::TypeCompiledFactory;
+use crate::values::Value;
 
 /// An argument being passed to a function
 #[derive(Debug)]
@@ -108,6 +113,8 @@ impl Param {
     }
 
     /// Create a [`ParamMode::Args`] parameter.
+    ///
+    /// `ty` is a tuple item type.
     pub fn args(ty: Ty) -> Self {
         Self {
             mode: ParamMode::Args,
@@ -117,6 +124,8 @@ impl Param {
     }
 
     /// Create a [`ParamMode::Kwargs`] parameter.
+    ///
+    /// `ty` is a dict value type.
     pub fn kwargs(ty: Ty) -> Self {
         Self {
             mode: ParamMode::Kwargs,
@@ -164,7 +173,7 @@ pub trait TyCustomFunctionImpl:
         span: Span,
         args: &[Spanned<Arg>],
         oracle: TypingOracleCtx,
-    ) -> Result<Ty, TypingError>;
+    ) -> Result<Ty, TypingOrInternalError>;
 }
 
 #[derive(
@@ -191,7 +200,7 @@ impl<F: TyCustomFunctionImpl> TyCustomImpl for TyCustomFunction<F> {
         span: Span,
         args: &[Spanned<Arg>],
         oracle: TypingOracleCtx,
-    ) -> Result<Ty, TypingError> {
+    ) -> Result<Ty, TypingOrInternalError> {
         self.0.validate_call(span, args, oracle)
     }
 
@@ -208,6 +217,19 @@ impl<F: TyCustomFunctionImpl> TyCustomImpl for TyCustomFunction<F> {
         } else {
             Err(())
         }
+    }
+
+    fn matcher<'v>(&self, factory: TypeCompiledFactory<'v>) -> TypeCompiled<Value<'v>> {
+        #[derive(Allocative, Eq, PartialEq, Hash, Clone, Copy, Dupe, Debug)]
+        struct FunctionMatcher;
+
+        impl TypeCompiledImpl for FunctionMatcher {
+            fn matches(&self, value: Value) -> bool {
+                value.vtable().starlark_value.HAS_invoke
+            }
+        }
+
+        factory.alloc(FunctionMatcher)
     }
 }
 
@@ -266,7 +288,7 @@ impl TyCustomFunctionImpl for TyFunction {
         span: Span,
         args: &[Spanned<Arg>],
         oracle: TypingOracleCtx,
-    ) -> Result<Ty, TypingError> {
+    ) -> Result<Ty, TypingOrInternalError> {
         oracle.validate_fn_call(span, self, args)
     }
 }

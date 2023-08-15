@@ -88,6 +88,7 @@ def cxx_toolchain_impl(ctx):
         linker = ctx.attrs.linker[RunInfo],
         linker_flags = cmd_args(ctx.attrs.linker_flags).add(c_lto_flags),
         lto_mode = lto_mode,
+        mk_shlib_intf = ctx.attrs.shared_library_interface_producer,
         object_file_extension = ctx.attrs.object_file_extension or "o",
         shlib_interfaces = "disabled",
         independent_shlib_interface_linker_flags = ctx.attrs.shared_library_interface_flags,
@@ -188,6 +189,7 @@ def cxx_toolchain_extra_attributes(is_toolchain_rule):
         "public_headers_symlinks_enabled": attrs.bool(default = True),
         "ranlib": attrs.option(dep_type(providers = [RunInfo]), default = None),
         "requires_objects": attrs.bool(default = False),
+        "shared_library_interface_producer": attrs.option(dep_type(providers = [RunInfo]), default = None),
         "split_debug_mode": attrs.enum(SplitDebugMode.values(), default = "none"),
         "strip": dep_type(providers = [RunInfo]),
         "supports_distributed_thinlto": attrs.bool(default = False),
@@ -255,7 +257,7 @@ def _get_shared_library_versioned_name_format(ctx: AnalysisContext) -> str:
     prefix = "" if extension_format == "dll" else "lib"
     return prefix + "{}." + extension_format
 
-def _get_maybe_wrapped_msvc(compiler: "RunInfo", compiler_type: str, msvc_hermetic_exec: "RunInfo") -> "RunInfo":
+def _get_maybe_wrapped_msvc(compiler: RunInfo.type, compiler_type: str, msvc_hermetic_exec: RunInfo.type) -> RunInfo.type:
     if compiler_type == "windows":
         return RunInfo(args = cmd_args(msvc_hermetic_exec, compiler))
     return compiler

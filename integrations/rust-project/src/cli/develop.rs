@@ -7,7 +7,6 @@
  * of this source tree.
  */
 
-use std::collections::BTreeMap;
 use std::io::BufWriter;
 use std::io::Write;
 use std::path::Path;
@@ -18,13 +17,13 @@ use tracing::info;
 
 use crate::buck;
 use crate::buck::relative_to;
+use crate::buck::select_mode;
 use crate::buck::to_json_project;
 use crate::json_project::Sysroot;
 use crate::sysroot::resolve_buckconfig_sysroot;
 use crate::sysroot::resolve_rustup_sysroot;
 use crate::sysroot::SysrootConfig;
 use crate::target::Target;
-use crate::target::TargetInfo;
 
 pub struct Develop {
     pub input: Input,
@@ -32,6 +31,7 @@ pub struct Develop {
     pub sysroot: SysrootConfig,
     pub pretty: bool,
     pub relative_paths: bool,
+    pub mode: Option<String>,
 }
 
 impl From<crate::Command> for Develop {
@@ -45,6 +45,7 @@ impl From<crate::Command> for Develop {
             sysroot,
             pretty,
             relative_paths,
+            mode,
         } = command
         {
             let input = if !targets.is_empty() {
@@ -73,6 +74,7 @@ impl From<crate::Command> for Develop {
                 sysroot,
                 pretty,
                 relative_paths,
+                mode,
             };
         }
 
@@ -99,8 +101,10 @@ impl Develop {
             sysroot,
             pretty,
             relative_paths,
+            mode,
         } = self;
-        let buck = buck::Buck;
+        let mode = select_mode(mode);
+        let buck = buck::Buck::new(mode);
         let project_root = buck.resolve_project_root()?;
 
         let targets = match input {
@@ -113,11 +117,9 @@ impl Develop {
             bail!("No targets can be inferred for the provided file.");
         }
 
-        let targets = buck.expand_targets(&targets)?;
-
-        let target_map: BTreeMap<Target, TargetInfo> = buck.resolve_deps(&targets)?;
-        let aliased_libraries = buck.query_aliased_libraries(&targets)?;
-        let proc_macros = buck.query_proc_macros(&targets)?;
+        let expanded_and_resolved = buck.expand_and_resolve(&targets)?;
+        let aliased_libraries =
+            buck.query_aliased_libraries(&expanded_and_resolved.expanded_targets)?;
 
         let sysroot = match &sysroot {
             SysrootConfig::Sysroot(path) => {
@@ -131,19 +133,14 @@ impl Develop {
                     sysroot_src: None,
                 }
             }
-            SysrootConfig::BuckConfig => {
-                let project_root = buck.resolve_project_root()?;
-                resolve_buckconfig_sysroot(&project_root, relative_paths)?
-            }
+            SysrootConfig::BuckConfig => resolve_buckconfig_sysroot(&project_root, relative_paths)?,
             SysrootConfig::Rustup => resolve_rustup_sysroot()?,
         };
         info!("converting buck info to rust-project.json");
         let rust_project = to_json_project(
             sysroot,
-            targets,
-            target_map,
+            expanded_and_resolved,
             aliased_libraries,
-            proc_macros,
             relative_paths,
         )?;
 

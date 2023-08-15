@@ -22,6 +22,12 @@ load(
     "ObjectsLinkable",
     "SharedLibLinkable",
 )
+load(
+    ":link_types.bzl",
+    "CxxLinkResultType",
+    "LinkOptions",
+    "link_options",
+)
 
 def _serialize_linkable(linkable):
     if linkable._type == LinkableType("archive"):
@@ -75,24 +81,22 @@ def _serialize_links(links: list[LinkArgs.type]):
     return [_serialize_link_args(link) for link in links]
 
 def serialize_anon_attrs(
-        links: list[LinkArgs.type],
         output: str,
-        import_library: ["artifact", None] = None,
-        link_execution_preference: LinkExecutionPreference.type = LinkExecutionPreference("any"),
-        enable_distributed_thinlto: bool = False,
-        identifier: [str, None] = None,
-        category_suffix: [str, None] = None) -> dict[str, ""]:
+        result_type: CxxLinkResultType.type,
+        opts: LinkOptions.type) -> dict[str, typing.Any]:
     return dict(
-        links = _serialize_links(links),
+        links = _serialize_links(opts.links),
         output = output,
-        import_library = import_library,
-        link_execution_preference = link_execution_preference.value,
-        enable_distributed_thinlto = enable_distributed_thinlto,
-        identifier = identifier,
-        category_suffix = category_suffix,
+        import_library = opts.import_library,
+        link_execution_preference = opts.link_execution_preference.value,
+        enable_distributed_thinlto = opts.enable_distributed_thinlto,
+        identifier = opts.identifier,
+        category_suffix = opts.category_suffix,
+        result_type = result_type.value,
+        allow_cache_upload = opts.allow_cache_upload,
     )
 
-def _deserialize_linkable(linkable: (str, "_payload")) -> "_Linkable":
+def _deserialize_linkable(linkable: (str, typing.Any)) -> typing.Any:
     typ, payload = linkable
 
     if typ == "archive":
@@ -124,7 +128,7 @@ def _deserialize_linkable(linkable: (str, "_payload")) -> "_Linkable":
 
     fail("Invalid linkable type: {}".format(typ))
 
-def _deserialize_link_info(actions: "actions", label: Label, info) -> LinkInfo.type:
+def _deserialize_link_info(actions: AnalysisActions, label: Label, info) -> LinkInfo.type:
     name, pre_flags, post_flags, linkables, external_debug_info = info
     return LinkInfo(
         name = name,
@@ -141,9 +145,9 @@ def _deserialize_link_info(actions: "actions", label: Label, info) -> LinkInfo.t
     )
 
 def _deserialize_link_args(
-        actions: "actions",
+        actions: AnalysisActions,
         label: Label,
-        link: (str, "_payload")) -> LinkArgs.type:
+        link: (str, typing.Any)) -> LinkArgs.type:
     typ, payload = link
 
     if typ == "flags":
@@ -154,20 +158,28 @@ def _deserialize_link_args(
 
     fail("invalid link args type: {}".format(typ))
 
-def deserialize_anon_attrs(actions: "actions", label: Label, attrs: "struct") -> dict[str, ""]:
-    return dict(
-        output = attrs.output,
+def deserialize_anon_attrs(
+        actions: AnalysisActions,
+        label: Label,
+        attrs: "struct") -> (str, CxxLinkResultType.type, LinkOptions.type):
+    opts = link_options(
         links = [_deserialize_link_args(actions, label, link) for link in attrs.links],
         import_library = attrs.import_library,
         link_execution_preference = LinkExecutionPreference(attrs.link_execution_preference),
         category_suffix = attrs.category_suffix,
         identifier = attrs.identifier,
         enable_distributed_thinlto = attrs.enable_distributed_thinlto,
+        allow_cache_upload = attrs.allow_cache_upload,
     )
+
+    result_type = CxxLinkResultType(attrs.result_type)
+
+    return (attrs.output, result_type, opts)
 
 # The attributes -- and their serialzied type -- that can be passed to an
 # anonymous link.
 ANON_ATTRS = {
+    "allow_cache_upload": attrs.bool(),
     "category_suffix": attrs.string(),
     "enable_distributed_thinlto": attrs.bool(),
     "identifier": attrs.option(attrs.string(), default = None),
@@ -232,5 +244,6 @@ ANON_ATTRS = {
         default = [],
     ),
     "output": attrs.string(),
+    "result_type": attrs.enum(CxxLinkResultType.values()),
     "_cxx_toolchain": attrs.dep(providers = [CxxToolchainInfo]),
 }

@@ -42,8 +42,9 @@ use allocative::Allocative;
 use async_trait::async_trait;
 use buck2_artifact::actions::key::ActionKey;
 use buck2_artifact::artifact::build_artifact::BuildArtifact;
+use buck2_artifact::artifact::provide_outputs::ProvideActionKey;
 use buck2_artifact::artifact::provide_outputs::ProvideOutputs;
-use buck2_common::http::counting_client::CountingHttpClient;
+use buck2_common::http::HttpClient;
 use buck2_common::io::IoProvider;
 use buck2_core::base_deferred_key::BaseDeferredKey;
 use buck2_core::category::Category;
@@ -55,6 +56,7 @@ use buck2_execute::artifact::fs::ExecutorFs;
 use buck2_execute::digest_config::DigestConfig;
 use buck2_execute::execute::action_digest::ActionDigest;
 use buck2_execute::execute::blocking::BlockingExecutor;
+use buck2_execute::execute::cache_uploader::CacheUploadResult;
 use buck2_execute::execute::cache_uploader::DepFileEntry;
 use buck2_execute::execute::manager::CommandExecutionManager;
 use buck2_execute::execute::prepared::PreparedAction;
@@ -65,6 +67,7 @@ use buck2_execute::re::manager::ManagedRemoteExecutionClient;
 use buck2_file_watcher::mergebase::Mergebase;
 use derivative::Derivative;
 use derive_more::Display;
+use dupe::Dupe;
 use indexmap::indexmap;
 use indexmap::IndexMap;
 use indexmap::IndexSet;
@@ -215,7 +218,7 @@ pub trait ActionExecutionCtx: Send + Sync {
         action_digest: ActionDigest,
         execution_result: &CommandExecutionResult,
         dep_file_entry: Option<DepFileEntry>,
-    ) -> anyhow::Result<bool>;
+    ) -> anyhow::Result<CacheUploadResult>;
 
     /// Executes a command
     /// TODO(bobyf) this seems like it deserves critical sections?
@@ -231,6 +234,7 @@ pub trait ActionExecutionCtx: Send + Sync {
         request: &CommandExecutionRequest,
         result: CommandExecutionResult,
         allows_cache_upload: bool,
+        allows_dep_file_cache_upload: bool,
     ) -> anyhow::Result<(ActionOutputs, ActionExecutionMetadata)>;
 
     /// Clean up all the output directories for this action. This requires a mutable reference
@@ -258,7 +262,7 @@ pub trait ActionExecutionCtx: Send + Sync {
     fn io_provider(&self) -> Arc<dyn IoProvider>;
 
     /// Http client used for fetching and downloading remote artifacts.
-    fn http_client(&self) -> CountingHttpClient;
+    fn http_client(&self) -> HttpClient;
 }
 
 #[derive(Error, Debug)]
@@ -302,13 +306,15 @@ impl TrivialDeferred for Arc<RegisteredAction> {
     }
 
     fn provide<'a>(&'a self, demand: &mut Demand<'a>) {
-        demand.provide_value_with(|| {
-            ProvideOutputs(
-                self.action
-                    .outputs()
-                    .map(|outputs| outputs.iter().cloned().collect()),
-            )
-        });
+        demand
+            .provide_value_with(|| {
+                ProvideOutputs(
+                    self.action
+                        .outputs()
+                        .map(|outputs| outputs.iter().cloned().collect()),
+                )
+            })
+            .provide_value_with(|| ProvideActionKey(self.key.dupe()));
     }
 }
 

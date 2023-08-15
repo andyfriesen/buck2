@@ -15,7 +15,7 @@ use std::sync::Arc;
 use allocative::Allocative;
 use buck2_core::cells::cell_path::CellPath;
 use buck2_core::provider::id::ProviderId;
-use buck2_interpreter::build_context::STARLARK_PATH_FROM_BUILD_CONTEXT;
+use buck2_interpreter::build_context::starlark_path_from_build_context;
 use buck2_interpreter::types::provider::callable::ProviderCallableLike;
 use dupe::Dupe;
 use either::Either;
@@ -253,6 +253,10 @@ impl<'v> StarlarkValue<'v> for UserProviderCallable {
         demand.provide_value::<&dyn ProviderCallableLike>(self);
     }
 
+    fn eval_type(&self) -> Option<Ty> {
+        self.id.get().map(|id| Ty::name_deprecated(id.name()))
+    }
+
     fn documentation(&self) -> Option<DocItem> {
         let return_types = vec![Ty::any(); self.fields.len()];
         self.provider_callable_documentation(
@@ -355,6 +359,10 @@ impl<'v> StarlarkValue<'v> for FrozenUserProviderCallable {
             &return_types,
         )
     }
+
+    fn eval_type(&self) -> Option<Ty> {
+        Some(Ty::name_deprecated(self.id.name()))
+    }
 }
 
 #[starlark_module]
@@ -400,7 +408,7 @@ pub fn register_provider(builder: &mut GlobalsBuilder) {
         eval: &mut Evaluator,
     ) -> anyhow::Result<UserProviderCallable> {
         let docstring = DocString::from_docstring(DocStringKind::Starlark, doc);
-        let path = (STARLARK_PATH_FROM_BUILD_CONTEXT.get()?)(eval)?.path();
+        let path = starlark_path_from_build_context(eval)?.path();
 
         let (field_names, field_docs) = match fields {
             Either::Left(f) => {

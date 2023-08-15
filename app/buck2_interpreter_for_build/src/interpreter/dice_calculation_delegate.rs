@@ -36,10 +36,10 @@ use buck2_interpreter::dice::starlark_provider::with_starlark_eval_provider;
 use buck2_interpreter::file_loader::LoadedModule;
 use buck2_interpreter::file_loader::ModuleDeps;
 use buck2_interpreter::import_paths::HasImportPaths;
-use buck2_interpreter::path::OwnedStarlarkModulePath;
-use buck2_interpreter::path::PackageFilePath;
-use buck2_interpreter::path::StarlarkModulePath;
-use buck2_interpreter::path::StarlarkPath;
+use buck2_interpreter::paths::module::OwnedStarlarkModulePath;
+use buck2_interpreter::paths::module::StarlarkModulePath;
+use buck2_interpreter::paths::package::PackageFilePath;
+use buck2_interpreter::paths::path::StarlarkPath;
 use buck2_interpreter::starlark_profiler::StarlarkProfilerOrInstrumentation;
 use buck2_node::nodes::eval_result::EvaluationResult;
 use buck2_node::super_package::SuperPackage;
@@ -95,7 +95,7 @@ impl<'c> HasCalculationDelegate<'c> for DiceComputations {
             type Value = SharedResult<Arc<InterpreterForCell>>;
             async fn compute(
                 &self,
-                ctx: &DiceComputations,
+                ctx: &mut DiceComputations,
                 _cancellation: &CancellationContext,
             ) -> Self::Value {
                 let cell_resolver = ctx.get_cell_resolver().await?;
@@ -159,7 +159,7 @@ impl<'c> DiceCalculationDelegate<'c> {
             type Value = SharedResult<LoadedModule>;
             async fn compute(
                 &self,
-                ctx: &DiceComputations,
+                ctx: &mut DiceComputations,
                 _cancellation: &CancellationContext,
             ) -> Self::Value {
                 let starlark_path = self.0.borrow();
@@ -267,7 +267,7 @@ impl<'c> DiceCalculationDelegate<'c> {
             self.ctx,
             &mut StarlarkProfilerOrInstrumentation::disabled(),
             format!("load:{}", &starlark_file),
-            move |provider| {
+            move |provider, _| {
                 let evaluation = self
                     .configs
                     .eval_module(
@@ -348,7 +348,7 @@ impl<'c> DiceCalculationDelegate<'c> {
             self.ctx,
             &mut StarlarkProfilerOrInstrumentation::disabled(),
             format!("load:{}", path),
-            move |provider| {
+            move |provider, _| {
                 self.configs
                     .eval_package_file(
                         path,
@@ -375,7 +375,7 @@ impl<'c> DiceCalculationDelegate<'c> {
 
             async fn compute(
                 &self,
-                ctx: &DiceComputations,
+                ctx: &mut DiceComputations,
                 _cancellation: &CancellationContext,
             ) -> Self::Value {
                 let interpreter = ctx
@@ -479,7 +479,7 @@ impl<'c> DiceCalculationDelegate<'c> {
             self.ctx,
             profiler_instrumentation,
             format!("load_buildfile:{}", &package),
-            move |provider| {
+            move |provider, _| {
                 span(start_event, move || {
                     let result = self
                         .configs
@@ -516,7 +516,7 @@ impl<'c> DiceCalculationDelegate<'c> {
 
 mod keys {
     use allocative::Allocative;
-    use buck2_interpreter::path::OwnedStarlarkModulePath;
+    use buck2_interpreter::paths::module::OwnedStarlarkModulePath;
     use derive_more::Display;
 
     #[derive(Clone, Display, Debug, Eq, Hash, PartialEq, Allocative)]
